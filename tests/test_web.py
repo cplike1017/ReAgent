@@ -120,6 +120,9 @@ def test_web_index(tmp_path):
         assert "agent.llm.retry_scheduled" in script
         assert "modelUsageDetail" in script
         assert "execution.queued" in script
+        assert "markExecutionStateUncertain" in script
+        assert "reconcileDetachedExecution" in script
+        assert "requestRejected" in script
 
 
 def test_web_capabilities(tmp_path):

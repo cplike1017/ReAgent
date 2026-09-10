@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v14 */
+/* ReAgent Web UI 前端逻辑 v15 */
 "use strict";
 
 const state = {
@@ -39,7 +39,7 @@ function setConnStatus(online) {
 
 function startExecution(data) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
-  state.executionId = data.execution_id || state.executionId;
+  state.executionId = data.execution_id || null;
   if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
   state.executionSteps = 0;
@@ -1001,6 +1001,7 @@ async function resumeExecutionEvents(record, afterSeq) {
       { signal: controller.signal }
     );
     if (!response.ok) throw new Error("HTTP " + String(response.status));
+    setConnStatus(true);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -1025,7 +1026,10 @@ async function resumeExecutionEvents(record, afterSeq) {
       }
     }
   } catch (error) {
-    if (error.name !== "AbortError") addErrorMsg("续接执行事件失败: " + error.message);
+    if (error.name !== "AbortError") {
+      setConnStatus(false);
+      markExecutionStateUncertain("执行事件连接已断开", "服务端任务可能仍在执行；可稍后从执行历史继续接续。");
+    }
   } finally {
     if (state.executionId === record.execution_id) {
       $("#stop").style.display = "none";
@@ -2440,6 +2444,41 @@ function bindTreeToggles(panel) {
   });
 }
 
+/* ================= 流式连接状态核对 ================= */
+function markExecutionStateUncertain(stage, detail) {
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  updateExecutionStatus("pending", "状态待确认", stage);
+  appendExecutionEvent("warning", "执行状态待确认", detail || "浏览器连接已断开；服务端任务可能仍在继续。");
+}
+
+async function reconcileDetachedExecution(executionId, assistantEl, contentEl) {
+  if (!executionId || state.executionId !== executionId || state.streaming) return;
+  try {
+    const response = await fetch("/api/web/executions/" + encodeURIComponent(executionId));
+    if (!response.ok) throw new Error("HTTP " + String(response.status));
+    const record = await response.json();
+    setConnStatus(true);
+    const events = await fetchAllExecutionEvents(executionId);
+    replayExecution(record, events);
+    assistantEl.classList.remove("streaming");
+
+    if (isActiveExecutionStatus(record.status)) {
+      contentEl.textContent = "连接已恢复，正在从持久化执行记录继续接续…";
+      await resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0);
+    } else {
+      contentEl.textContent = "执行已结束，正在加载会话历史。";
+      if (record.session_id) await openSession(record.session_id);
+    }
+  } catch (error) {
+    setConnStatus(false);
+    markExecutionStateUncertain(
+      "执行连接已断开，状态待确认",
+      "无法读取服务端执行记录；请稍后从执行历史使用 execution ID 继续查看。"
+    );
+  }
+}
+
 /* ================= 发送 ================= */
 async function send() {
   const input = $("#input");
@@ -2449,6 +2488,7 @@ async function send() {
   addMessage("user", message);
   scrollToLatest();
   input.value = "";
+  // 新提交在服务器确认 execution_id 前不能继承上一轮运行的取消/回放目标。
   startExecution({ mode: state.agentMode, message_preview: message });
   setStreaming(true);
 
@@ -2458,9 +2498,9 @@ async function send() {
   contentEl.className = "md-body";
   contentEl.textContent = "";
 
-  // 停止按钮
   state.abortCtrl = new AbortController();
   $("#stop").style.display = "block";
+  let detachedExecutionId = null;
 
   try {
     const resp = await fetch("/api/web/chat/stream", {
@@ -2469,6 +2509,21 @@ async function send() {
       body: JSON.stringify({ message, session_id: state.sessionId, agent_mode: state.agentMode }),
       signal: state.abortCtrl.signal,
     });
+    if (!resp.ok) {
+      let message = "HTTP " + String(resp.status);
+      try {
+        const payload = await resp.json();
+        message = payload.detail && typeof payload.detail === "object"
+          ? String(payload.detail.message || message)
+          : String(payload.detail || message);
+      } catch (error) {
+        // 非 JSON 错误体保留 HTTP 状态，避免把 HTML 当作 SSE 解析。
+      }
+      const requestError = new Error(message);
+      requestError.requestRejected = true;
+      throw requestError;
+    }
+    setConnStatus(true);
     const executionId = resp.headers.get("X-Execution-ID");
     if (executionId) state.executionId = executionId;
     const reader = resp.body.getReader();
@@ -2485,12 +2540,11 @@ async function send() {
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const frame = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        handleFrame(frame, contentEl, (ans, data) => { finalAnswer = ans; finalData = data; });
+        handleFrame(frame, contentEl, (answer, data) => { finalAnswer = answer; finalData = data; });
       }
     }
     if (finalAnswer) {
       contentEl.innerHTML = renderMarkdown(finalAnswer);
-      // 补复制按钮
       ensureCopyButton(assistantEl, finalAnswer);
     }
     assistantEl.classList.remove("streaming");
@@ -2504,25 +2558,44 @@ async function send() {
         tool_calls: finalData.tool_calls,
       });
     }
-  } catch (e) {
-    if (e.name === "AbortError") {
-      contentEl.textContent = "⏹ 已停止生成。";
-      finishExecution("cancelled", "已停止接收执行结果");
-      appendExecutionEvent("warning", "已请求停止", "服务端会清理当前执行任务");
+  } catch (error) {
+    assistantEl.classList.remove("streaming");
+    if (error.requestRejected) {
+      contentEl.textContent = "⚠️ 请求被服务端拒绝: " + error.message;
+      finishExecution("error", "请求被服务端拒绝");
+      appendExecutionEvent("error", "请求被服务端拒绝", error.message);
     } else {
-      assistantEl.classList.remove("streaming");
-      contentEl.textContent = "⚠️ 请求失败: " + e.message;
-      finishExecution("error", "请求失败");
-      appendExecutionEvent("error", "请求失败", e.message);
+      const knownExecutionId = state.executionId;
+      setConnStatus(false);
+      if (knownExecutionId) {
+        detachedExecutionId = knownExecutionId;
+        contentEl.textContent = error.name === "AbortError"
+          ? "本地连接已停止，正在核对服务端执行状态…"
+          : "连接已中断，正在核对服务端执行状态…";
+        markExecutionStateUncertain(
+          "连接已断开，状态待确认",
+          "服务端任务可能仍在继续；正在从持久化事件记录重新接续。"
+        );
+      } else {
+        contentEl.textContent = error.name === "AbortError"
+          ? "停止请求发生在服务器返回执行标识前，状态待确认。"
+          : "连接未建立或已中断，服务器执行状态待确认。";
+        markExecutionStateUncertain(
+          "状态待确认",
+          "尚未收到 execution ID，无法将本地连接与服务端任务可靠关联。"
+        );
+      }
     }
   }
   $("#stop").style.display = "none";
   setStreaming(false);
   loadSessions();
-  // 编排记录可能新增（delegate 工具）
   if (state.sessionId) {
     loadOrchestrations(state.sessionId);
     loadExecutionHistory(state.sessionId);
+  }
+  if (detachedExecutionId) {
+    void reconcileDetachedExecution(detachedExecutionId, assistantEl, contentEl);
   }
 }
 
