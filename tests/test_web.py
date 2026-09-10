@@ -123,6 +123,8 @@ def test_web_index(tmp_path):
         assert "markExecutionStateUncertain" in script
         assert "reconcileDetachedExecution" in script
         assert "requestRejected" in script
+        assert "registerExecutionEvent" in script
+        assert "lastExecutionSeq" in script
 
 
 def test_web_capabilities(tmp_path):

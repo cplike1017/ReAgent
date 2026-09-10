@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v15 */
+/* ReAgent Web UI 前端逻辑 v16 */
 "use strict";
 
 const state = {
@@ -11,6 +11,8 @@ const state = {
   executionTimer: null,
   executionSteps: 0,
   executionTools: 0,
+  executionEventIds: new Set(),
+  lastExecutionSeq: 0,
   executionHistory: [],
   followLatest: true,
   currentPlanVersion: null,
@@ -37,9 +39,38 @@ function setConnStatus(online) {
   $("#conn-text").textContent = online ? "已连接" : "连接失败";
 }
 
+function resetExecutionEventCursor() {
+  state.executionEventIds.clear();
+  state.lastExecutionSeq = 0;
+}
+
+function registerExecutionEvent(event) {
+  const payload = event && event.payload ? event.payload : (event || {});
+  const executionId = event && event.execution_id ? event.execution_id : payload.execution_id;
+  const eventId = event && event.event_id ? event.event_id : payload.event_id;
+  const seq = Number(event && event.seq != null ? event.seq : payload.seq);
+
+  // 只有 execution.queued 能成为另一条运行的入口；其余旧运行事件不能污染当前面板。
+  if (executionId && state.executionId && executionId !== state.executionId) return false;
+  if (eventId && state.executionEventIds.has(eventId)) return false;
+  if (Number.isInteger(seq) && seq > 0 && state.lastExecutionSeq > 0 && seq <= state.lastExecutionSeq) return false;
+
+  if (eventId) {
+    state.executionEventIds.add(eventId);
+    // seq 仍是主要去重依据；限制 Set 大小以免超长执行无限占用内存。
+    if (state.executionEventIds.size > 4096) {
+      const oldest = state.executionEventIds.values().next().value;
+      state.executionEventIds.delete(oldest);
+    }
+  }
+  if (Number.isInteger(seq) && seq > 0) state.lastExecutionSeq = Math.max(state.lastExecutionSeq, seq);
+  return true;
+}
+
 function startExecution(data) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || null;
+  resetExecutionEventCursor();
   if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
   state.executionSteps = 0;
@@ -1063,6 +1094,7 @@ function replayExecution(record, events) {
   state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
   state.executionSteps = 0;
   state.executionTools = 0;
+  resetExecutionEventCursor();
   clearLivePlan();
   clearLiveOrchestrations();
   clearExecutionContext();
@@ -1090,6 +1122,7 @@ function replayExecution(record, events) {
 }
 
 function replayExecutionEvent(event) {
+  if (!registerExecutionEvent(event)) return;
   const payload = event.payload || {};
   const timestamp = event.timestamp;
   const type = event.event_type;
@@ -1565,6 +1598,7 @@ function toolHistoryToCardData(message, declaredCall) {
 function newSession() {
   state.sessionId = null;
   state.executionId = null;
+  resetExecutionEventCursor();
   state.executionStartedAt = null;
   state.executionSteps = 0;
   state.executionTools = 0;
@@ -2625,16 +2659,20 @@ function handleFrame(frame, contentEl, onComplete) {
   let data;
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
+  // 新运行只接受服务端确认的 queued（兼容旧流的 started）入口；旧运行的晚到帧直接忽略。
+  if ((event === "execution.queued" || event === "execution.started")
+      && data.execution_id && data.execution_id !== state.executionId) {
+    startExecution(data);
+  }
+  if (!registerExecutionEvent(data)) return;
   if (applyRuntimeLifecycleEvent(event, data, data.timestamp) || applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
 
   switch (event) {
     case "execution.queued":
-      if (data.execution_id && data.execution_id !== state.executionId) startExecution(data);
       updateExecutionStatus("pending", "排队中", executionQueueDetail(data));
       appendExecutionEvent("pending", "任务已进入执行队列", executionQueueDetail(data), data.timestamp);
       break;
     case "execution.started":
-      if (data.execution_id && data.execution_id !== state.executionId) startExecution(data);
       updateExecutionStatus("running", "执行中", "正在准备执行环境");
       appendExecutionEvent("running", "任务开始执行", data.mode ? "模式：" + formatMode(data.mode) : "", data.timestamp);
       break;
