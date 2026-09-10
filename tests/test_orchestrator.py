@@ -7,7 +7,7 @@ import pytest
 
 from app.agent.runtime import AgentRuntime
 from app.config import Settings
-from app.errors import LLMError
+from app.errors import LLMError, ToolExecutionError
 from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.orchestrator.events import OrchestrationHooks
 from app.orchestrator.executor import SubAgentExecutor
@@ -16,6 +16,7 @@ from app.orchestrator.profiles import get_profile
 from app.orchestrator.runner import OrchestratorRunner
 from app.orchestrator.tool import build_delegate_tool
 from app.tools.builtin import build_default_registry
+from app.tools.registry import ToolDefinition
 from app.tracing.recorder import TraceRecorder
 
 
@@ -288,6 +289,74 @@ async def test_executor_runs_sub_agent(orch_settings, registry):
     assert result.status == "SUCCEEDED"
     assert result.answer == "研究报告(researcher)"
     assert result.steps >= 1
+
+
+@pytest.mark.asyncio
+async def test_executor_emits_real_tool_retry_events(orch_settings, registry):
+    """子 Agent 也只在 Gateway 已决定继续尝试时发出重试生命周期事件。"""
+    class ToolCallingLLM(BaseLLMClient):
+        model = "tool-calling"
+
+        async def chat(self, messages, tools=None, **kwargs):
+            if any(message.get("role") == "tool" for message in messages):
+                return LLMResponse(content="工具结果已就绪", model=self.model)
+            return LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_subagent_flaky",
+                        name="calculator",
+                        arguments={"expression": "1 + 1"},
+                    )
+                ],
+                finish_reason="tool_calls",
+                model=self.model,
+            )
+
+    calculator = registry.get("calculator")
+    invocations = {"count": 0}
+
+    def flaky_calculator(expression):
+        invocations["count"] += 1
+        if invocations["count"] <= 2:
+            raise ToolExecutionError("子任务上游暂时不可用", transient=True)
+        return 2
+
+    registry.register(
+        ToolDefinition(
+            name=calculator.name,
+            description=calculator.description,
+            input_model=calculator.input_model,
+            handler=flaky_calculator,
+            timeout_seconds=calculator.timeout_seconds,
+            risk_level=calculator.risk_level,
+            required_permission=calculator.required_permission,
+            output_model=calculator.output_model,
+            extra=calculator.extra,
+        ),
+        overwrite=True,
+    )
+    retries = []
+
+    async def on_retry(*args):
+        retries.append(args)
+
+    executor = SubAgentExecutor(
+        llm=ToolCallingLLM(),
+        master_registry=registry,
+        settings=orch_settings,
+    )
+    result = await executor.execute(
+        get_profile("generalist"),
+        "运行易抖动工具",
+        hooks=OrchestrationHooks(agent_tool_retry_scheduled=on_retry),
+        orchestration_run_id="run_retry",
+        agent_instance_id="run_retry:agent:0",
+    )
+    assert result.status == "SUCCEEDED"
+    assert invocations["count"] == 3
+    assert [item[5] for item in retries] == [1, 2]
+    assert all(item[0] == "run_retry" and item[1] == "run_retry:agent:0" for item in retries)
+    assert all(item[-1].type == "ToolExecutionError" for item in retries)
 
 
 @pytest.mark.asyncio

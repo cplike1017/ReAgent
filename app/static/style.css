@@ -758,6 +758,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
   border-top: 1px dashed var(--border);
 }
 .ts-output-detail .ts-code { max-height: 420px; }
+.ts-retry-live { color: var(--warning); }
 
 .workflow {
   overflow: hidden;

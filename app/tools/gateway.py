@@ -22,7 +22,7 @@ Gateway 统一负责，任何一层失败都返回结构化信封，绝不抛裸
 """
 import asyncio
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pydantic import ValidationError
 
@@ -40,6 +40,10 @@ from app.tools.registry import ToolRegistry
 from app.tools.schemas import ToolResult, UserContext
 from app.tracing.recorder import TraceRecorder, redact
 from app.tracing.span import trace_span
+
+
+# 第一个参数是即将开始的重试次数（从 1 起），第二个是最多允许的重试数。
+ToolRetryHook = Callable[[int, int, Any], Awaitable[None]]
 
 
 class PermissionChecker:
@@ -80,10 +84,12 @@ class ToolGateway:
         name: str,
         args: dict,
         user: UserContext | None = None,
+        *,
+        on_retry: ToolRetryHook | None = None,
     ) -> ToolResult:
         """执行一次工具调用，返回统一信封（永不抛异常，除非 Gateway 自身故障）。"""
         if self.recorder is None or not self.recorder.enabled:
-            return await self._execute_impl(name, args, user)
+            return await self._execute_impl(name, args, user, on_retry=on_retry)
 
         async with trace_span(
             "tool_gateway",
@@ -92,7 +98,7 @@ class ToolGateway:
             attributes={"tool_name": name},
             recorder=self.recorder,
         ) as span:
-            result = await self._execute_impl(name, args, user)
+            result = await self._execute_impl(name, args, user, on_retry=on_retry)
             span.output = {
                 "success": result.success,
                 "error_type": result.error.type if result.error else None,
@@ -104,6 +110,8 @@ class ToolGateway:
         name: str,
         args: dict,
         user: UserContext | None,
+        *,
+        on_retry: ToolRetryHook | None = None,
     ) -> ToolResult:
         start = time.perf_counter()
         metadata: dict = {
@@ -182,6 +190,10 @@ class ToolGateway:
             except ToolExecutionError as exc:
                 if exc.transient and attempt < self.max_retries:
                     attempt += 1
+                    if on_retry is not None:
+                        retry_error = ToolResult.fail(name, exc).error
+                        if retry_error is not None:
+                            await on_retry(attempt, self.max_retries, retry_error)
                     continue  # 瞬时错误重试（最多 max_tool_retries 次）
                 return ToolResult.fail(name, exc, metadata=self._meta(start, metadata))
             except Exception as exc:  # 未知异常也包装成结构化失败

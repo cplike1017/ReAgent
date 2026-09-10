@@ -24,7 +24,7 @@ from app.agent.context_builder import ContextBuilder
 from app.agent.models import AgentTurnResult, PlanStep
 from app.agent.plan_loop import PlanExecutor
 from app.agent.planner import Planner
-from app.agent.react_loop import LoopHooks, run_react_loop
+from app.agent.react_loop import LoopHooks, ToolRetryHook, run_react_loop
 from app.agent.reflector import Reflector
 from app.agent.state import AgentState
 from app.checkpoint.models import CheckpointRecord
@@ -102,8 +102,18 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     # 工具执行入口：走 Tool Gateway（含 tool_gateway / tool.execute Span）
     # ------------------------------------------------------------------
-    async def _execute_tool(self, name: str, args: dict) -> ToolResult:
-        return await self.tool_gateway.execute(name, args, user=self._current_user)
+    async def _execute_tool(
+        self,
+        name: str,
+        args: dict,
+        on_retry: ToolRetryHook | None = None,
+    ) -> ToolResult:
+        return await self.tool_gateway.execute(
+            name,
+            args,
+            user=self._current_user,
+            on_retry=on_retry,
+        )
 
     # ------------------------------------------------------------------
     # LLM 调用入口：包上 llm_call Span（记录 model / tokens / finish_reason）
@@ -228,6 +238,20 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_tool:
             await self._extra_hooks.after_tool(tc, envelope, step)
 
+    async def _hook_tool_retry_scheduled(
+        self,
+        tool_call,
+        step: int,
+        attempt: int,
+        max_retries: int,
+        error,
+    ) -> None:
+        """只转发 Gateway 已真实决定执行的下一次尝试。"""
+        if self._extra_hooks and self._extra_hooks.tool_retry_scheduled:
+            await self._extra_hooks.tool_retry_scheduled(
+                tool_call, step, attempt, max_retries, error
+            )
+
     async def _hook_before_final(self, response, step: int) -> None:
         """最终回答前：状态置 DONE，保存最后检查点。"""
         state = self._state
@@ -272,6 +296,19 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_tool:
             await self._extra_hooks.after_tool(tool_call, envelope, step)
 
+    async def _forward_plan_step_tool_retry(
+        self,
+        tool_call,
+        step: int,
+        attempt: int,
+        max_retries: int,
+        error,
+    ) -> None:
+        if self._extra_hooks and self._extra_hooks.tool_retry_scheduled:
+            await self._extra_hooks.tool_retry_scheduled(
+                tool_call, step, attempt, max_retries, error
+            )
+
     async def _forward_plan_step_context_built(self, built, step: int) -> None:
         if self._extra_hooks and self._extra_hooks.context_built:
             await self._extra_hooks.context_built(built, step)
@@ -283,6 +320,7 @@ class AgentRuntime:
             after_decision=self._forward_plan_step_after_decision,
             before_tool=self._forward_plan_step_before_tool,
             after_tool=self._forward_plan_step_after_tool,
+            tool_retry_scheduled=self._forward_plan_step_tool_retry,
             context_built=self._forward_plan_step_context_built,
         )
 
@@ -360,6 +398,7 @@ class AgentRuntime:
             after_decision=self._hook_after_decision,
             before_tool=self._hook_before_tool,
             after_tool=self._hook_after_tool,
+            tool_retry_scheduled=self._hook_tool_retry_scheduled,
             before_final=self._hook_before_final,
             context_built=self._hook_context_built,
             plan_created=self._hook_plan_created,

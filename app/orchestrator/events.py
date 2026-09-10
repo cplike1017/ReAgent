@@ -30,6 +30,8 @@ class OrchestrationHooks:
     agent_llm_started: EventHook | None = None
     agent_decision: EventHook | None = None
     agent_tool_started: EventHook | None = None
+    # Gateway 已确认下一次瞬时故障重试（run_id, instance_id, profile, tool_call, ...）
+    agent_tool_retry_scheduled: EventHook | None = None
     agent_tool_completed: EventHook | None = None
     # 子 Agent 终态：run_id, agent_instance_id, step_index, AgentRunResult
     agent_completed: EventHook | None = None

@@ -83,8 +83,8 @@ class SubAgentExecutor:
 
         user_content = task if not context else f"{task}\n\n【依赖步骤结果（仅作参考）】\n{context}"
 
-        async def _execute_tool(name: str, args: dict):
-            return await gateway.execute(name, args)
+        async def _execute_tool(name: str, args: dict, on_retry=None):
+            return await gateway.execute(name, args, on_retry=on_retry)
 
         # 消息序列：system（人设）+ user（委派任务）
         messages = [
@@ -138,11 +138,26 @@ class SubAgentExecutor:
                 step,
             )
 
+        async def _on_tool_retry(tool_call, step: int, attempt: int, max_retries: int, error) -> None:
+            await notify(
+                hooks,
+                "agent_tool_retry_scheduled",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                tool_call,
+                step,
+                attempt,
+                max_retries,
+                error,
+            )
+
         react_hooks = LoopHooks(
             before_llm=_before_llm,
             after_decision=_after_decision,
             before_tool=_before_tool,
             after_tool=_after_tool,
+            tool_retry_scheduled=_on_tool_retry,
         )
         try:
             # 子 agent 的 llm 调用也包上 llm_call span（嵌套在 agent.run 下）

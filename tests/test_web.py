@@ -10,6 +10,7 @@ import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.errors import ToolExecutionError
 from app.execution.models import ExecutionStatus
 from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.main import create_app
@@ -111,6 +112,7 @@ def test_web_index(tmp_path):
         script = client.get("/app.js").text
         assert "tool-output-detail-btn" in script
         assert "/outputs/" in script
+        assert "tool.retry_scheduled" in script
 
 
 def test_web_capabilities(tmp_path):
@@ -469,6 +471,58 @@ def test_web_redacts_tool_output_before_events_and_details(tmp_path):
             f"/api/web/executions/{execution_id}/outputs/{tool_result['output_id']}"
         ).json()
         assert detail["content"] == {"token_redacted": "[REDACTED]", "value": False}
+
+
+def test_web_streams_real_tool_retry_events(tmp_path):
+    """瞬时失败的重试必须在最终工具结果之前实时持久化，且关联同一调用 ID。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        runtime = client.app.state.runtime
+        calculator = runtime.registry.get("calculator")
+        invocations = {"count": 0}
+
+        def flaky_calculator(expression):
+            invocations["count"] += 1
+            if invocations["count"] <= 2:
+                raise ToolExecutionError("上游暂时不可用", transient=True)
+            return 2
+
+        runtime.registry.register(
+            ToolDefinition(
+                name=calculator.name,
+                description=calculator.description,
+                input_model=calculator.input_model,
+                handler=flaky_calculator,
+                timeout_seconds=calculator.timeout_seconds,
+                risk_level=calculator.risk_level,
+                required_permission=calculator.required_permission,
+                output_model=calculator.output_model,
+                extra=calculator.extra,
+            ),
+            overwrite=True,
+        )
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "计算 1 + 1", "agent_mode": "react"},
+        ) as response:
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        retries = [data for name, data in events if name == "tool.retry_scheduled"]
+        result = next(data for name, data in events if name == "tool_result")
+        started = next(data for name, data in events if name == "tool.started")
+        assert invocations["count"] == 3
+        assert [item["attempt"] for item in retries] == [1, 2]
+        assert all(item["max_retries"] == 2 for item in retries)
+        assert all(item["error"]["type"] == "ToolExecutionError" for item in retries)
+        assert all(item["tool_call_id"] == started["tool_call_id"] for item in retries)
+        assert result["tool_call_id"] == started["tool_call_id"]
+        assert result["retries"] == 2
+        assert names.index("tool.started") < names.index("tool.retry_scheduled") < names.index("tool_result")
+
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        assert [item["event_type"] for item in stored] == names
 
 
 def test_web_execution_stream_replays_all_terminal_events(tmp_path):

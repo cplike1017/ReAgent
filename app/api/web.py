@@ -315,6 +315,24 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 },
             )
 
+        def _retry_error_payload(error) -> dict:
+            if hasattr(error, "model_dump"):
+                return error.model_dump(mode="json")
+            return {"type": type(error).__name__, "message": str(error)}
+
+        async def _hook_tool_retry_scheduled(tc, step: int, attempt: int, max_retries: int, error) -> None:
+            await _emit(
+                "tool.retry_scheduled",
+                {
+                    "step": step,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": _retry_error_payload(error),
+                },
+            )
+
         def _tool_output_payload(envelope: ToolResult, *, kind: str) -> dict:
             """为 SSE 生成受限预览，并把完整脱敏值留在按需详情存储中。"""
             # 数据边界：实时事件与详情存储均使用相同的脱敏值；不让详情接口
@@ -587,6 +605,31 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 },
             )
 
+        async def _hook_agent_tool_retry_scheduled(
+            run_id,
+            agent_instance_id,
+            profile: str,
+            tc,
+            step: int,
+            attempt: int,
+            max_retries: int,
+            error,
+        ) -> None:
+            await _emit(
+                "agent.tool.retry_scheduled",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "tool_call_id": tc.id,
+                    "tool": tc.name,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": _retry_error_payload(error),
+                },
+            )
+
         async def _hook_agent_tool_completed(run_id, agent_instance_id, profile: str, tc, envelope: ToolResult, step: int) -> None:
             payload = {
                 "run_id": run_id,
@@ -676,6 +719,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             agent_llm_started=_hook_agent_llm_started,
             agent_decision=_hook_agent_decision,
             agent_tool_started=_hook_agent_tool_started,
+            agent_tool_retry_scheduled=_hook_agent_tool_retry_scheduled,
             agent_tool_completed=_hook_agent_tool_completed,
             agent_completed=_hook_agent_completed,
             agent_failed=_hook_agent_failed,
@@ -690,6 +734,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             after_decision=_hook_after_decision,
             before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
+            tool_retry_scheduled=_hook_tool_retry_scheduled,
             before_final=_hook_before_final,
             context_built=_hook_context_built,
             memory_retrieved=_hook_memory_retrieved,

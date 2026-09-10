@@ -30,6 +30,11 @@ from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.tools.schemas import ToolResult
 
 
+# Gateway 在真实发生瞬时故障后、下一次尝试之前调用。错误实体由网关提供，
+# 边缘订阅者只负责序列化其可公开字段。
+ToolRetryHook = Callable[[int, int, Any], Awaitable[None]]
+
+
 @dataclass
 class LoopHooks:
     """ReAct 循环各关键节点的钩子（Stage 3 Checkpoint、Stage 6 Tracing 注入点）。"""
@@ -42,6 +47,8 @@ class LoopHooks:
     before_tool: Callable[[ToolCallRequest, int], Awaitable[None]] | None = None
     # 每个工具执行完成之后（保存"工具执行后"检查点）
     after_tool: Callable[[ToolCallRequest, ToolResult, int], Awaitable[None]] | None = None
+    # Gateway 实际安排了一次瞬时故障重试（tool_call, step, attempt, max_retries, error）
+    tool_retry_scheduled: Callable[[ToolCallRequest, int, int, int, Any], Awaitable[None]] | None = None
     # 即将返回最终回答之前（保存"Final Answer 前"检查点）
     before_final: Callable[[LLMResponse, int], Awaitable[None]] | None = None
     # Context Builder 已生成真正送入模型的输入（ContextBuildResult, step）
@@ -72,7 +79,7 @@ async def run_react_loop(
     llm: BaseLLMClient,
     tools_schema: list[dict],
     messages: list[dict],
-    execute_tool: Callable[[str, dict], Awaitable[ToolResult]],
+    execute_tool: Callable[[str, dict, ToolRetryHook | None], Awaitable[ToolResult]],
     max_steps: int = 8,
     context_builder: Any | None = None,
     hooks: LoopHooks | None = None,
@@ -84,7 +91,7 @@ async def run_react_loop(
     :param llm:            统一 LLM 客户端
     :param tools_schema:   OpenAI 格式工具 Schema 列表
     :param messages:       可变的会话消息列表（函数内会追加 assistant/tool 消息）
-    :param execute_tool:   工具执行器：async (name, args) -> ToolResult
+    :param execute_tool:   工具执行器：async (name, args, on_retry) -> ToolResult
     :param max_steps:      最大循环步数，防止死循环
     :param context_builder: 可选；非空时每轮循环都重新构建送入模型的上下文
     :param hooks:          可选钩子（检查点 / 追踪）
@@ -153,8 +160,14 @@ async def run_react_loop(
             all_tool_calls.append(tc)
             if hooks and hooks.before_tool:
                 await hooks.before_tool(tc, steps)
+            retry_hook: ToolRetryHook | None = None
+            if hooks and hooks.tool_retry_scheduled:
+                async def _on_tool_retry(attempt: int, max_retries: int, error: Any) -> None:
+                    await hooks.tool_retry_scheduled(tc, steps, attempt, max_retries, error)
+
+                retry_hook = _on_tool_retry
             try:
-                envelope: ToolResult = await execute_tool(tc.name, tc.arguments)
+                envelope: ToolResult = await execute_tool(tc.name, tc.arguments, retry_hook)
             except asyncio.CancelledError:
                 # 客户端断开/取消：补一条 tool 失败消息，保证 assistant(tool_calls)
                 # 与 tool 消息配对完整（否则下次请求网关报 "No tool output found"）

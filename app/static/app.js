@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v11 */
+/* ReAgent Web UI 前端逻辑 v12 */
 "use strict";
 
 const state = {
@@ -771,12 +771,21 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
       payload.is_final ? "正在整理子任务结果" : "已确定下一步",
       timestamp
     );
-  } else if (type === "agent.tool.started" || type === "agent.tool.completed") {
+  } else if (type === "agent.tool.started" || type === "agent.tool.retry_scheduled" || type === "agent.tool.completed") {
     const agent = upsertOrchestrationAgent(run, payload);
     const completed = type === "agent.tool.completed";
+    const retrying = type === "agent.tool.retry_scheduled";
     if (agent) {
       agent.status = "RUNNING";
-      agent.stage = (completed ? "已完成工具调用：" : "正在调用工具：") + String(payload.tool || "");
+      if (retrying) {
+        const attempt = Math.max(1, Number(payload.attempt) || 1);
+        const maxRetries = Math.max(0, Number(payload.max_retries) || 0);
+        const error = payload.error && payload.error.message ? String(payload.error.message) : "";
+        agent.stage = "工具暂时失败，正在重试：" + String(payload.tool || "");
+        agent.toolSummary = String(payload.tool || "工具") + "：第 " + String(attempt) + "/" + String(maxRetries) + " 次重试" + (error ? " · " + error : "");
+      } else {
+        agent.stage = (completed ? "已完成工具调用：" : "正在调用工具：") + String(payload.tool || "");
+      }
       if (completed) {
         const toolCallId = String(payload.tool_call_id || "");
         if (!toolCallId || !agent.completedToolCallIds.has(toolCallId)) {
@@ -788,12 +797,10 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
         agent.toolSummary = String(payload.tool || "工具") + "：" + (payload.success === false ? error || "执行失败" : output);
       }
     }
-    appendExecutionEvent(
-      completed && payload.success === false ? "error" : completed ? "success" : "running",
-      (completed ? "子 Agent 工具完成：" : "子 Agent 调用工具：") + String(payload.tool || ""),
-      String(payload.agent_profile || ""),
-      timestamp
-    );
+    const kind = retrying ? "warning" : completed && payload.success === false ? "error" : completed ? "success" : "running";
+    const title = retrying ? "子 Agent 工具准备重试：" : completed ? "子 Agent 工具完成：" : "子 Agent 调用工具：";
+    const retryDetail = retrying ? "第 " + String(payload.attempt || 1) + "/" + String(payload.max_retries || "?") + " 次" : String(payload.agent_profile || "");
+    appendExecutionEvent(kind, title + String(payload.tool || ""), retryDetail, timestamp);
   } else if (type === "agent.completed" || type === "agent.failed" || type === "agent.skipped") {
     const agent = upsertOrchestrationAgent(run, payload);
     if (agent) {
@@ -1062,7 +1069,12 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "tool.started") {
+    markToolRunning(payload);
     appendExecutionEvent("running", "开始调用工具：" + String(payload.tool || ""), "", timestamp);
+    return;
+  }
+  if (type === "tool.retry_scheduled") {
+    recordToolRetry(payload, timestamp);
     return;
   }
   if (type === "tool_result") {
@@ -1748,6 +1760,43 @@ function parseDelegateOutput(raw) {
     return obj && typeof obj === "object" && "agent_results" in obj ? obj : null;
   } catch (error) {
     return null;
+  }
+}
+
+function recordToolRetry(data, timestamp) {
+  const attempt = Math.max(1, Number(data.attempt) || 1);
+  const maxRetries = Math.max(0, Number(data.max_retries) || 0);
+  const error = toolErrorText(data.error);
+  updateExecutionStatus(
+    "running",
+    "执行中",
+    "工具暂时失败，正在重试：" + String(data.tool || "")
+  );
+  appendExecutionEvent(
+    "warning",
+    "工具准备重试：" + String(data.tool || ""),
+    "第 " + String(attempt) + "/" + String(maxRetries) + " 次" + (error ? " · " + error : ""),
+    timestamp
+  );
+  const cards = $$("#messages .ts-card[data-tool-call-id]");
+  for (let index = cards.length - 1; index >= 0; index--) {
+    const card = cards[index];
+    if (!data.tool_call_id || card.dataset.toolCallId !== data.tool_call_id) continue;
+    if (card.dataset.toolStatus === "succeeded" || card.dataset.toolStatus === "failed") return;
+    card.dataset.toolStatus = "running";
+    const status = card.querySelector(".ts-status");
+    if (status) status.outerHTML = toolStatusMarkup("running");
+    card.dataset.toolRetries = String(attempt);
+    const body = card.querySelector(".ts-body");
+    if (body) {
+      const oldNotice = body.querySelector(".ts-retry-live");
+      if (oldNotice) oldNotice.remove();
+      const notice = document.createElement("p");
+      notice.className = "ts-meta ts-retry-live";
+      notice.textContent = "瞬时故障，正在第 " + String(attempt) + "/" + String(maxRetries) + " 次重试" + (error ? "：" + error : "");
+      body.appendChild(notice);
+    }
+    return;
   }
 }
 
@@ -2438,6 +2487,9 @@ function handleFrame(frame, contentEl, onComplete) {
       markToolRunning(data);
       updateExecutionStatus("running", "执行中", "正在调用工具：" + String(data.tool || ""));
       appendExecutionEvent("running", "开始调用工具：" + String(data.tool || ""), "");
+      break;
+    case "tool.retry_scheduled":
+      recordToolRetry(data, data.timestamp);
       break;
     case "tool_result":
       // 回填对应的卡片：优先按稳定 tool_call_id，而不是按工具名猜测。

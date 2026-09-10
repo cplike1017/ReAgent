@@ -135,7 +135,7 @@ async def test_react_loop_cancel_completes_pairing():
 
     calls = 0
 
-    async def execute_tool(name, args):
+    async def execute_tool(name, args, on_retry=None):
         nonlocal calls
         calls += 1
         if calls == 4:

@@ -243,6 +243,22 @@ async def test_transient_error_retry(gateway):
     assert result.metadata.get("retries") == 2  # 重试了 2 次
 
 
+async def test_transient_error_retry_notifies_actual_attempts(gateway):
+    """观察器只在 Gateway 已决定继续重试时触发，次数与结果元数据一致。"""
+    attempts: list[tuple[int, int, str]] = []
+
+    async def on_retry(attempt, max_retries, error):
+        attempts.append((attempt, max_retries, error.type))
+
+    result = await gateway.execute("flaky_tool", {}, on_retry=on_retry)
+    assert result.success is True
+    assert result.metadata["retries"] == 2
+    assert attempts == [
+        (1, gateway.max_retries, "ToolExecutionError"),
+        (2, gateway.max_retries, "ToolExecutionError"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Result Validation
 # ---------------------------------------------------------------------------
