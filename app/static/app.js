@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v17 */
+/* ReAgent Web UI 前端逻辑 v18 */
 "use strict";
 
 const state = {
@@ -159,6 +159,15 @@ function timelineEventMatchesFilter(kind) {
   return true;
 }
 
+function hasTimelineDetail(detail) {
+  return detail !== null && detail !== undefined && String(detail) !== "";
+}
+
+function timelineDetailNeedsExpansion(detail) {
+  const text = String(detail);
+  return text.length > 96 || /[\r\n]/.test(text);
+}
+
 function applyTimelineFilter() {
   const list = $("#execution-timeline");
   if (!list) return { total: 0, visible: 0 };
@@ -222,11 +231,24 @@ function appendExecutionEvent(kind, title, detail, timestamp) {
   heading.className = "timeline-title";
   heading.textContent = title;
   item.appendChild(heading);
-  if (detail) {
+  if (hasTimelineDetail(detail)) {
+    const detailText = String(detail);
     const copy = document.createElement("div");
     copy.className = "timeline-detail";
-    copy.textContent = detail;
+    copy.textContent = detailText;
+    copy.title = detailText;
     item.appendChild(copy);
+    if (timelineDetailNeedsExpansion(detailText)) {
+      const expanded = document.createElement("details");
+      expanded.className = "timeline-detail-expand";
+      const summary = document.createElement("summary");
+      summary.textContent = "查看完整详情";
+      const full = document.createElement("div");
+      full.className = "timeline-detail-full";
+      full.textContent = detailText;
+      expanded.append(summary, full);
+      item.appendChild(expanded);
+    }
   }
   const time = document.createElement("time");
   time.className = "timeline-time";

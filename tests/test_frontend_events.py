@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -63,6 +63,12 @@ assert.strictEqual(timelineEventMatchesFilter("error"), true);
 assert.strictEqual(timelineEventMatchesFilter("pending"), false);
 state.timelineFilter = "all";
 assert.strictEqual(timelineEventMatchesFilter("success"), true);
+assert.strictEqual(hasTimelineDetail(0), true, "falsy numeric details remain observable");
+assert.strictEqual(hasTimelineDetail(false), true, "falsy boolean details remain observable");
+assert.strictEqual(hasTimelineDetail(""), false);
+assert.strictEqual(timelineDetailNeedsExpansion("简短详情"), false);
+assert.strictEqual(timelineDetailNeedsExpansion("x".repeat(97)), true);
+assert.strictEqual(timelineDetailNeedsExpansion("第一行\n第二行"), true);
 '''
 
     result = subprocess.run(

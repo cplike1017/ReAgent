@@ -995,6 +995,23 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .timeline-item.warning::before { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-bg); }
 .timeline-title { color: var(--text); font-size: 12px; font-weight: 670; line-height: 1.4; }
 .timeline-detail { margin-top: 2px; overflow: hidden; color: var(--text-muted); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-detail-expand { margin-top: 4px; }
+.timeline-detail-expand summary { width: fit-content; color: var(--accent); cursor: pointer; font-size: 10px; font-weight: 650; }
+.timeline-detail-expand[open] summary { margin-bottom: 5px; }
+.timeline-detail-full {
+  max-height: 190px;
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .timeline-time { display: block; margin-top: 2px; color: var(--text-subtle); font-size: 10px; }
 .timeline-empty { padding: 16px 4px; color: var(--text-subtle); font-size: 12px; line-height: 1.55; }
 .live-plan { display: grid; max-height: 218px; gap: 6px; overflow: auto; }
