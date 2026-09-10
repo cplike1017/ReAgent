@@ -140,6 +140,8 @@ async function loadSessions() {
     const data = await fetch("/api/web/sessions").then((r) => r.json());
     const ul = $("#session-list");
     ul.innerHTML = "";
+    const count = $("#session-count");
+    if (count) count.textContent = String((data.sessions || []).length);
     (data.sessions || []).forEach((s) => {
       const li = document.createElement("li");
       li.className = "session-item";
@@ -420,14 +422,17 @@ function addToolMsg(data) {
   // 流式中的工具调用卡片：点击可展开查看参数/输出/耗时
   const div = document.createElement("div");
   div.className = "msg tool ts-card";
-  div.dataset.toolCallId = data.tool_call_id || data.tool || "";
+  div.dataset.toolCallId = data.tool_call_id || "";
+  div.dataset.toolName = data.tool || "";
+  div.dataset.toolStatus = data.success === false ? "failed" : data.success === true ? "succeeded" : "pending";
   const dur = data.duration_ms != null ? ` · ⏱ ${formatMs(data.duration_ms)}` : "";
-  const statusIcon = data.success === false ? "❌" : "✅";
+  const statusState = data.success === false ? "failed" : data.success === true ? "succeeded" : "pending";
+  const statusIcon = statusState === "failed" ? "❌" : statusState === "pending" ? "⏳" : "✅";
   div.innerHTML = `
     <div class="ts-header">
       <span class="ts-icon">${data.tool === "delegate" ? "🌐" : "🛠"}</span>
       <span class="ts-name">${esc(data.tool)}</span>
-      <span class="ts-status ${data.success === false ? "err" : "ok"}">${statusIcon}</span>
+      <span class="ts-status ${statusState === "failed" ? "err" : statusState === "pending" ? "pending" : "ok"}">${statusIcon}</span>
       <span class="ts-dur">${dur}</span>
       <span class="ts-args-preview">${esc(JSON.stringify(data.arguments || {}).slice(0, 50))}</span>
       <span class="ts-caret">▾</span>
@@ -507,11 +512,16 @@ function updateToolCard(name, data) {
   const cards = $$("#messages .ts-card[data-tool-call-id]");
   for (let i = cards.length - 1; i >= 0; i--) {
     const card = cards[i];
-    if (card.dataset.toolCallId === name || (card.dataset.toolCallId === "" && card.querySelector(".ts-name").textContent === name)) {
+    const callId = data.tool_call_id || "";
+    const matchesId = callId && card.dataset.toolCallId === callId;
+    const matchesPendingName = !callId && card.dataset.toolName === name && card.dataset.toolStatus === "pending";
+    if (matchesId || matchesPendingName) {
       // 更新状态和输出
       const statusEl = card.querySelector(".ts-status");
-      statusEl.textContent = data.success === false ? "❌" : "✅";
-      statusEl.className = "ts-status " + (data.success === false ? "err" : "ok");
+      const statusState = data.success === false ? "failed" : "succeeded";
+      statusEl.textContent = statusState === "failed" ? "❌" : "✅";
+      statusEl.className = "ts-status " + (statusState === "failed" ? "err" : "ok");
+      card.dataset.toolStatus = statusState;
       if (data.duration_ms != null) {
         const durEl = card.querySelector(".ts-dur");
         durEl.textContent = " · ⏱ " + formatMs(data.duration_ms);
@@ -547,6 +557,8 @@ function addErrorMsg(message) {
 function setStatus(text) {
   const el = $("#chat-status");
   if (el) el.textContent = text;
+  const stage = $("#run-stage");
+  if (stage) stage.textContent = text || "准备就绪";
 }
 
 function scrollToBottom() {
@@ -921,7 +933,7 @@ function handleFrame(frame, contentEl, onComplete) {
     case "step":
       if (data.tool_calls && data.tool_calls.length) {
         data.tool_calls.forEach((tc) => {
-          addToolMsg({ tool: tc.name, arguments: tc.arguments, success: true, data: "等待执行..." });
+          addToolMsg({ tool: tc.name, arguments: tc.arguments, tool_call_id: tc.id, data: "等待执行..." });
         });
       }
       break;
@@ -977,6 +989,33 @@ function bindEvents() {
   });
   if (newBtn) newBtn.addEventListener("click", newSession);
 
+  const themeBtn = $("#theme-toggle");
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      const nextTheme = document.body.dataset.theme === "dark" ? "light" : "dark";
+      document.body.dataset.theme = nextTheme;
+      themeBtn.textContent = nextTheme === "dark" ? "☀" : "◐";
+      try { localStorage.setItem("reagent-theme", nextTheme); } catch (e) { /* 忽略 */ }
+    });
+    try {
+      const savedTheme = localStorage.getItem("reagent-theme");
+      if (savedTheme === "dark") {
+        document.body.dataset.theme = "dark";
+        themeBtn.textContent = "☀";
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  const inspectorBtn = $("#toggle-inspector");
+  if (inspectorBtn) {
+    inspectorBtn.addEventListener("click", () => {
+      document.body.classList.toggle("inspector-collapsed");
+      const collapsed = document.body.classList.contains("inspector-collapsed");
+      inspectorBtn.title = collapsed ? "展开执行面板" : "收起执行面板";
+      inspectorBtn.setAttribute("aria-label", inspectorBtn.title);
+    });
+  }
+
   // 上传文件
   if (uploadBtn && fileInput) {
     uploadBtn.addEventListener("click", () => fileInput.click());
@@ -1002,7 +1041,9 @@ function bindEvents() {
       document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.agentMode = btn.dataset.mode;
-      $("#mode-badge").textContent = btn.dataset.mode;
+      $("#mode-badge").textContent = btn.dataset.mode === "plan" ? "Plan" : "ReAct";
+      const inspectorMode = $("#inspector-mode");
+      if (inspectorMode) inspectorMode.textContent = btn.dataset.mode === "plan" ? "Plan" : "ReAct";
     });
   });
 

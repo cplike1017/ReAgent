@@ -3,99 +3,189 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ReAgent Web UI</title>
-<link rel="stylesheet" href="/style.css?v=4">
+<title>ReAgent · Agent 工作台</title>
+<link rel="stylesheet" href="/style.css?v=5">
 </head>
-<body>
-<div class="layout">
-  <!-- 侧边栏 -->
-  <aside class="sidebar">
+<body data-theme="light">
+<div class="app-shell">
+  <aside class="sidebar" aria-label="会话与能力导航">
     <div class="brand">
-      <h1>ReAgent</h1>
-      <span class="badge" id="mode-badge">react</span>
-    </div>
-
-    <div class="panel">
-      <h3>执行模式</h3>
-      <div class="mode-switch">
-        <button class="mode-btn active" data-mode="react">React</button>
-        <button class="mode-btn" data-mode="plan">Plan</button>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h3>工具 <span class="count" id="tool-count">0</span></h3>
-      <ul class="cap-list" id="tool-list"></ul>
-    </div>
-
-    <div class="panel">
-      <h3>子 Agent 档案 <button id="add-agent-btn" class="mini-btn" title="注册新档案">＋</button></h3>
-      <ul class="cap-list" id="agent-list"></ul>
-      <div class="agent-form" id="agent-form" style="display:none">
-        <input type="text" id="agent-name" placeholder="档案名（英文）" class="af-input">
-        <input type="text" id="agent-desc" placeholder="职责说明" class="af-input">
-        <textarea id="agent-prompt" placeholder="系统提示（人设 + 工作规范）" class="af-input" rows="3"></textarea>
-        <input type="text" id="agent-tools" placeholder="工具白名单，逗号分隔（留空=全部）" class="af-input">
-        <div class="af-row">
-          <button id="agent-save" class="af-btn primary">注册</button>
-          <button id="agent-cancel" class="af-btn">取消</button>
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">R</span>
+        <div>
+          <h1>ReAgent</h1>
+          <span class="brand-subtitle">Agent 工作台</span>
         </div>
-        <div class="af-error" id="agent-error"></div>
       </div>
+      <span class="badge" id="mode-badge" aria-label="当前执行模式">ReAct</span>
     </div>
 
-    <div class="panel">
-      <h3>技能 <span class="count" id="skill-count">0</span></h3>
-      <ul class="cap-list" id="skill-list"></ul>
-    </div>
+    <button id="new-session" class="new-session-btn" type="button">
+      <span aria-hidden="true">＋</span> 新建任务
+    </button>
 
-    <div class="panel">
-      <h3>MCP Servers <span class="count" id="mcp-count">0</span></h3>
-      <ul class="cap-list" id="mcp-list"></ul>
-    </div>
+    <section class="sidebar-section sessions-section" aria-labelledby="sessions-heading">
+      <div class="section-heading">
+        <h2 id="sessions-heading">最近会话</h2>
+        <span class="count" id="session-count" aria-label="会话数量">0</span>
+      </div>
+      <ul class="cap-list session-list" id="session-list" aria-label="会话列表"></ul>
+    </section>
 
-    <div class="panel">
-      <h3>会话 <button id="new-session" class="mini-btn" title="新建会话">＋</button></h3>
-      <ul class="cap-list" id="session-list"></ul>
-    </div>
+    <div class="sidebar-scroll">
+      <details class="capability-group" open>
+        <summary>能力与资源</summary>
+        <section class="panel">
+          <h3>工具 <span class="count" id="tool-count">0</span></h3>
+          <ul class="cap-list" id="tool-list"></ul>
+        </section>
+        <section class="panel">
+          <h3>技能 <span class="count" id="skill-count">0</span></h3>
+          <ul class="cap-list" id="skill-list"></ul>
+        </section>
+        <section class="panel">
+          <h3>MCP Servers <span class="count" id="mcp-count">0</span></h3>
+          <ul class="cap-list" id="mcp-list"></ul>
+        </section>
+      </details>
 
-    <div class="panel">
-      <h3>文件 <button id="upload-btn" class="mini-btn" title="上传文件到沙箱">↑</button></h3>
-      <ul class="cap-list" id="file-list"></ul>
-      <input type="file" id="file-input" style="display:none">
-    </div>
+      <details class="capability-group">
+        <summary>子 Agent 档案</summary>
+        <section class="panel">
+          <h3>可用档案 <button id="add-agent-btn" class="mini-btn" type="button" title="注册新档案" aria-label="注册新档案">＋</button></h3>
+          <ul class="cap-list" id="agent-list"></ul>
+          <div class="agent-form" id="agent-form" style="display:none">
+            <input type="text" id="agent-name" placeholder="档案名（英文）" class="af-input">
+            <input type="text" id="agent-desc" placeholder="职责说明" class="af-input">
+            <textarea id="agent-prompt" placeholder="系统提示（人设 + 工作规范）" class="af-input" rows="3"></textarea>
+            <input type="text" id="agent-tools" placeholder="工具白名单，逗号分隔（留空=全部）" class="af-input">
+            <div class="af-row">
+              <button id="agent-save" class="af-btn primary" type="button">注册</button>
+              <button id="agent-cancel" class="af-btn" type="button">取消</button>
+            </div>
+            <div class="af-error" id="agent-error" role="alert"></div>
+          </div>
+        </section>
+      </details>
 
-    <div class="panel">
-      <h3>编排记录 <span class="count" id="orch-count">0</span></h3>
-      <ul class="cap-list" id="orch-list"></ul>
+      <details class="capability-group">
+        <summary>文件与编排</summary>
+        <section class="panel">
+          <h3>文件 <button id="upload-btn" class="mini-btn" type="button" title="上传文件到沙箱" aria-label="上传文件">↑</button></h3>
+          <ul class="cap-list" id="file-list"></ul>
+          <input type="file" id="file-input" hidden>
+        </section>
+        <section class="panel">
+          <h3>编排记录 <span class="count" id="orch-count">0</span></h3>
+          <ul class="cap-list" id="orch-list"></ul>
+        </section>
+      </details>
     </div>
   </aside>
 
-  <!-- 主区 -->
   <main class="main">
     <header class="chat-header">
-      <span id="conn-status" class="status-dot"></span>
-      <span id="conn-text">连接中...</span>
-      <span class="chat-status" id="chat-status"></span>
+      <div class="task-context">
+        <p class="eyebrow">当前任务</p>
+        <h2 id="workspace-title">开始一个新任务</h2>
+        <div class="connection-status" aria-live="polite">
+          <span id="conn-status" class="status-dot"></span>
+          <span id="conn-text">正在检查连接…</span>
+          <span class="chat-status" id="chat-status"></span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="mode-switch" role="group" aria-label="执行模式">
+          <button class="mode-btn active" data-mode="react" type="button">ReAct</button>
+          <button class="mode-btn" data-mode="plan" type="button">Plan</button>
+        </div>
+        <button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换深浅主题">◐</button>
+      </div>
     </header>
 
-    <div class="messages" id="messages">
-      <div class="welcome">
-        <h2>🤖 ReAgent</h2>
-        <p>ReAct / Plan 双模式 · 记忆 · MCP · 技能 · 多 Agent 编排</p>
-        <p class="sub">工作流完全透明：每步决策、工具调用、耗时、Trace 树实时可见</p>
-      </div>
-    </div>
+    <div class="workspace">
+      <section class="chat-column" aria-label="对话">
+        <div class="run-summary" id="run-summary">
+          <div class="run-summary-main">
+            <span id="run-state-badge" class="run-state-badge idle">准备就绪</span>
+            <span id="run-stage">提交任务后，执行过程会实时显示在右侧。</span>
+          </div>
+          <div class="run-metrics" aria-label="本次执行统计">
+            <span><b id="run-step-count">0</b> 轮决策</span>
+            <span><b id="run-tool-count">0</b> 次工具</span>
+            <span><b id="run-elapsed">0s</b></span>
+          </div>
+        </div>
 
-    <div class="composer">
-      <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" rows="1"></textarea>
-      <button id="stop" class="stop-btn" style="display:none" title="停止生成">■</button>
-      <button id="send" class="send-btn">发送</button>
+        <div class="messages" id="messages" aria-live="polite">
+          <div class="welcome">
+            <span class="welcome-mark" aria-hidden="true">R</span>
+            <h2>让 Agent 的每一步都有迹可循</h2>
+            <p>发送任务后，可在右侧查看决策轮次、工具调用、计划和 Trace 详情。</p>
+            <div class="welcome-tips">
+              <span>ReAct：边思考边调用工具</span>
+              <span>Plan：先分解，再逐步执行</span>
+              <span>支持多 Agent 编排</span>
+            </div>
+          </div>
+        </div>
+        <button id="jump-latest" class="jump-latest" type="button" hidden>回到最新进度 ↓</button>
+
+        <div class="composer">
+          <textarea id="input" placeholder="描述想让 Agent 完成的任务，Enter 发送，Shift+Enter 换行" rows="1" aria-label="任务输入"></textarea>
+          <button id="stop" class="stop-btn" type="button" style="display:none" title="停止生成">停止</button>
+          <button id="send" class="send-btn" type="button">发送 <span aria-hidden="true">↑</span></button>
+        </div>
+      </section>
+
+      <aside class="execution-panel" id="execution-panel" aria-label="执行过程">
+        <div class="execution-panel-header">
+          <div>
+            <p class="eyebrow">执行过程</p>
+            <h2>实时观察</h2>
+          </div>
+          <button id="toggle-inspector" class="icon-btn inspector-toggle" type="button" title="收起执行面板" aria-label="收起执行面板">›</button>
+        </div>
+
+        <section class="execution-overview" aria-label="当前运行状态">
+          <div class="overview-row">
+            <span class="overview-label">状态</span>
+            <strong id="inspector-state">等待任务</strong>
+          </div>
+          <div class="overview-row">
+            <span class="overview-label">执行模式</span>
+            <strong id="inspector-mode">ReAct</strong>
+          </div>
+        </section>
+
+        <section class="inspector-section" aria-labelledby="timeline-heading">
+          <div class="inspector-heading">
+            <h3 id="timeline-heading">事件时间线</h3>
+            <span id="timeline-count" class="count">0</span>
+          </div>
+          <ol id="execution-timeline" class="execution-timeline">
+            <li class="timeline-empty">任务开始后，这里会展示真实的执行事件。</li>
+          </ol>
+        </section>
+
+        <section id="live-plan-section" class="inspector-section" hidden aria-labelledby="live-plan-heading">
+          <div class="inspector-heading">
+            <h3 id="live-plan-heading">执行计划</h3>
+            <span id="live-plan-meta" class="count">0 步</span>
+          </div>
+          <div id="live-plan" class="live-plan"></div>
+        </section>
+
+        <section class="inspector-section inspector-note">
+          <h3>可见范围</h3>
+          <p>展示实际采集的决策、工具和 Trace 数据。未启用或已脱敏的内容会明确标识。</p>
+        </section>
+      </aside>
     </div>
   </main>
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=4"></script>
+<script src="/app.js?v=5"></script>
 </body>
 </html>
