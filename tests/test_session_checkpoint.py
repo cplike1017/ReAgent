@@ -102,6 +102,30 @@ async def test_runtime_creates_checkpoints(full_runtime):
     assert versions == [1, 2, 3, 4, 5, 6]
 
 
+@pytest.mark.asyncio
+async def test_checkpoint_hooks_expose_saved_and_restored_records(full_runtime):
+    """检查点事件必须来自实际保存/恢复的记录，且版本可关联。"""
+    saved: list[tuple[str, int, str]] = []
+
+    async def on_saved(checkpoint, point):
+        saved.append((checkpoint.checkpoint_id, checkpoint.version, point))
+
+    await full_runtime.run("你好", session_id="session_ckpt_hooks", extra_hooks=LoopHooks(checkpoint_saved=on_saved))
+    assert [point for _, _, point in saved] == ["before_llm", "after_decision", "before_final"]
+    assert [version for _, version, _ in saved] == [1, 2, 3]
+
+    restored: list[tuple[str, int]] = []
+
+    async def on_restored(checkpoint):
+        restored.append((checkpoint.checkpoint_id, checkpoint.version))
+
+    await full_runtime.resume(
+        "session_ckpt_hooks",
+        extra_hooks=LoopHooks(checkpoint_restored=on_restored),
+    )
+    assert restored == [(saved[-1][0], saved[-1][1])]
+
+
 # ---------------------------------------------------------------------------
 # 断点恢复：LLM 决策后崩溃（PENDING_TOOL）
 # ---------------------------------------------------------------------------

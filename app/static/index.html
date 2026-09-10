@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=9">
+<link rel="stylesheet" href="/style.css?v=10">
 </head>
 <body data-theme="light">
 <div class="app-shell">
@@ -199,6 +199,14 @@
           <div id="live-orchestrations" class="live-orchestrations" aria-label="子 Agent 实时执行状态"></div>
         </section>
 
+        <section id="execution-context-section" class="inspector-section" hidden aria-labelledby="execution-context-heading">
+          <div class="inspector-heading">
+            <h3 id="execution-context-heading">执行环境</h3>
+            <span id="execution-context-meta" class="count">未采集</span>
+          </div>
+          <div id="execution-context" class="execution-context" aria-label="上下文、技能、记忆与检查点事实"></div>
+        </section>
+
         <section class="inspector-section inspector-note">
           <h3>可见范围</h3>
           <p>展示实际采集的决策、工具和 Trace 数据。未启用或已脱敏的内容会明确标识。</p>
@@ -209,6 +217,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=9"></script>
+<script src="/app.js?v=10"></script>
 </body>
 </html>

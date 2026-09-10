@@ -150,7 +150,7 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     # 持久化 + 检查点
     # ------------------------------------------------------------------
-    def _persist_and_checkpoint(self, state: AgentState, messages: list[dict], point: str) -> None:
+    async def _persist_and_checkpoint(self, state: AgentState, messages: list[dict], point: str) -> None:
         """把新消息写入 Session 并保存 Checkpoint（point 是保存原因标记）。
 
         防御：只持久化"tool 配对完整"的消息段——若 assistant(tool_calls) 声明了
@@ -186,13 +186,15 @@ class AgentRuntime:
                     session_id=state.session_id,
                     point=point,
                 )
+            if self._extra_hooks and self._extra_hooks.checkpoint_saved:
+                await self._extra_hooks.checkpoint_saved(self._last_checkpoint, point)
 
     # ------------------------------------------------------------------
     # 钩子（挂到 ReAct 循环的关键节点）
     # ------------------------------------------------------------------
     async def _hook_before_llm(self, step: int, messages: list[dict]) -> None:
         self._state.step = step
-        self._persist_and_checkpoint(self._state, messages, "before_llm")
+        await self._persist_and_checkpoint(self._state, messages, "before_llm")
         if self._extra_hooks and self._extra_hooks.before_llm:
             await self._extra_hooks.before_llm(step, messages)
 
@@ -207,7 +209,7 @@ class AgentRuntime:
         else:
             state.status = "RUNNING"
             state.pending_tool_calls = []
-        self._persist_and_checkpoint(state, state.messages, "after_decision")
+        await self._persist_and_checkpoint(state, state.messages, "after_decision")
         if self._extra_hooks and self._extra_hooks.after_decision:
             await self._extra_hooks.after_decision(response, step)
 
@@ -222,7 +224,7 @@ class AgentRuntime:
         state.status = "RUNNING"
         state.pending_tool_calls = []
         state.last_tool_result = envelope.model_dump(mode="json")
-        self._persist_and_checkpoint(state, state.messages, "after_tool")
+        await self._persist_and_checkpoint(state, state.messages, "after_tool")
         if self._extra_hooks and self._extra_hooks.after_tool:
             await self._extra_hooks.after_tool(tc, envelope, step)
 
@@ -232,9 +234,26 @@ class AgentRuntime:
         # Plan 步骤也会运行独立 ReAct；其局部回答不是整个用户回合的终态。
         state.status = "RUNNING" if state.agent_mode == "plan" else "DONE"
         state.pending_tool_calls = []
-        self._persist_and_checkpoint(state, state.messages, "before_final")
+        await self._persist_and_checkpoint(state, state.messages, "before_final")
         if self._extra_hooks and self._extra_hooks.before_final:
             await self._extra_hooks.before_final(response, step)
+
+    async def _hook_context_built(self, built, step: int) -> None:
+        """实际 Context Builder 完成后转发统计，正文仍由采集边界保护。"""
+        if self._extra_hooks and self._extra_hooks.context_built:
+            await self._extra_hooks.context_built(built, step)
+
+    async def _hook_memory_retrieved(self, query: str, docs: list[str], purpose: str) -> None:
+        if self._extra_hooks and self._extra_hooks.memory_retrieved:
+            await self._extra_hooks.memory_retrieved(query, docs, purpose)
+
+    async def _hook_skills_selected(self, skills: list) -> None:
+        if self._extra_hooks and self._extra_hooks.skills_selected:
+            await self._extra_hooks.skills_selected(skills)
+
+    async def _hook_memory_stored(self, count: int) -> None:
+        if self._extra_hooks and self._extra_hooks.memory_stored:
+            await self._extra_hooks.memory_stored(count)
 
     async def _forward_plan_step_before_llm(self, step: int, messages: list[dict]) -> None:
         """转发隔离子步骤的模型开始事件，不把临时 messages 持久化进主会话。"""
@@ -253,6 +272,10 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_tool:
             await self._extra_hooks.after_tool(tool_call, envelope, step)
 
+    async def _forward_plan_step_context_built(self, built, step: int) -> None:
+        if self._extra_hooks and self._extra_hooks.context_built:
+            await self._extra_hooks.context_built(built, step)
+
     def _build_plan_step_hooks(self) -> LoopHooks:
         """Plan 子步骤的观察钩子：仅向外发布事实，避免污染主会话/检查点。"""
         return LoopHooks(
@@ -260,6 +283,7 @@ class AgentRuntime:
             after_decision=self._forward_plan_step_after_decision,
             before_tool=self._forward_plan_step_before_tool,
             after_tool=self._forward_plan_step_after_tool,
+            context_built=self._forward_plan_step_context_built,
         )
 
     async def _hook_plan_created(self, plan, plan_version: int, task: str) -> None:
@@ -268,7 +292,7 @@ class AgentRuntime:
             state.plan = plan
             state.plan_revisions = max(0, plan_version - 1)
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_created")
+            await self._persist_and_checkpoint(state, state.messages, "plan_created")
         if self._extra_hooks and self._extra_hooks.plan_created:
             await self._extra_hooks.plan_created(plan, plan_version, task)
 
@@ -277,7 +301,7 @@ class AgentRuntime:
         if state is not None:
             state.plan = []
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_degraded")
+            await self._persist_and_checkpoint(state, state.messages, "plan_degraded")
         if self._extra_hooks and self._extra_hooks.plan_degraded:
             await self._extra_hooks.plan_degraded(plan_version, task, reason)
 
@@ -286,7 +310,7 @@ class AgentRuntime:
         if state is not None:
             state.step = step.order + 1
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_step_started")
+            await self._persist_and_checkpoint(state, state.messages, "plan_step_started")
         if self._extra_hooks and self._extra_hooks.plan_step_started:
             await self._extra_hooks.plan_step_started(step, plan_version, total)
 
@@ -294,7 +318,7 @@ class AgentRuntime:
         state = self._state
         if state is not None:
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_step_completed")
+            await self._persist_and_checkpoint(state, state.messages, "plan_step_completed")
         if self._extra_hooks and self._extra_hooks.plan_step_completed:
             await self._extra_hooks.plan_step_completed(step, plan_version, total)
 
@@ -302,7 +326,7 @@ class AgentRuntime:
         state = self._state
         if state is not None:
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_step_failed")
+            await self._persist_and_checkpoint(state, state.messages, "plan_step_failed")
         if self._extra_hooks and self._extra_hooks.plan_step_failed:
             await self._extra_hooks.plan_step_failed(step, plan_version, total)
 
@@ -310,14 +334,14 @@ class AgentRuntime:
         state = self._state
         if state is not None:
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_summarize_started")
+            await self._persist_and_checkpoint(state, state.messages, "plan_summarize_started")
         if self._extra_hooks and self._extra_hooks.plan_summarize_started:
             await self._extra_hooks.plan_summarize_started(plan, plan_version)
 
     async def _hook_reflection_completed(self, decision, plan_version: int) -> None:
         state = self._state
         if state is not None:
-            self._persist_and_checkpoint(state, state.messages, "reflection_completed")
+            await self._persist_and_checkpoint(state, state.messages, "reflection_completed")
         if self._extra_hooks and self._extra_hooks.reflection_completed:
             await self._extra_hooks.reflection_completed(decision, plan_version)
 
@@ -326,7 +350,7 @@ class AgentRuntime:
         if state is not None:
             state.plan_revisions = max(0, next_version - 1)
             state.status = "RUNNING"
-            self._persist_and_checkpoint(state, state.messages, "plan_revised")
+            await self._persist_and_checkpoint(state, state.messages, "plan_revised")
         if self._extra_hooks and self._extra_hooks.plan_revised:
             await self._extra_hooks.plan_revised(previous_plan, previous_version, next_version, decision)
 
@@ -337,6 +361,7 @@ class AgentRuntime:
             before_tool=self._hook_before_tool,
             after_tool=self._hook_after_tool,
             before_final=self._hook_before_final,
+            context_built=self._hook_context_built,
             plan_created=self._hook_plan_created,
             plan_degraded=self._hook_plan_degraded,
             plan_step_started=self._hook_plan_step_started,
@@ -362,10 +387,12 @@ class AgentRuntime:
         if self.memory is not None:
             if query:
                 retrieved_docs = await self.memory.retrieve(query, session_id=state.session_id)
+                await self._hook_memory_retrieved(query, retrieved_docs, "context")
 
         # Skill：匹配用户输入对应的技能，指令注入上下文
         if self.skill_manager is not None and query:
             matched = await self.skill_manager.matched_skills(query)
+            await self._hook_skills_selected(matched)
             if matched:
                 skill_blocks = [s.to_prompt_block() for s in matched]
                 retrieved_docs = (retrieved_docs or []) + skill_blocks
@@ -419,9 +446,10 @@ class AgentRuntime:
 
         # Stage 8：回合结束后，把本轮信息提炼写入记忆（下一轮才能检索到）
         if self.memory is not None and self.settings.memory_auto_extract:
-            await self.memory.remember(
+            stored = await self.memory.remember(
                 result.messages, session_id=state.session_id, turn_id=state.turn_id
             )
+            await self._hook_memory_stored(len(stored))
 
         return result
 
@@ -461,6 +489,7 @@ class AgentRuntime:
         memory_context: list[str] | None = None
         if self.memory is not None:
             memory_context = await self.memory.retrieve(task, session_id=state.session_id)
+            await self._hook_memory_retrieved(task, memory_context, "planning")
 
         while True:
             # 每次执行使用独立的回合消息快照（基于原始 messages 拷贝），
@@ -498,7 +527,7 @@ class AgentRuntime:
         state.plan_revisions = revisions
         state.status = "DONE"
         state.pending_tool_calls = []
-        self._persist_and_checkpoint(state, messages, "plan_final")
+        await self._persist_and_checkpoint(state, messages, "plan_final")
         return plan, final_answer, all_tool_calls, revisions
 
     # ------------------------------------------------------------------
@@ -650,6 +679,9 @@ class AgentRuntime:
                 session_id=session_id,
             )
 
+        if self._extra_hooks and self._extra_hooks.checkpoint_restored:
+            await self._extra_hooks.checkpoint_restored(checkpoint)
+
         # 从检查点反序列化状态 —— 状态来自 Checkpoint，而非用户输入
         state = AgentState(**checkpoint.state)
         state.turn_id = turn_id or state.turn_id
@@ -684,7 +716,7 @@ class AgentRuntime:
             state.status = "RUNNING"
             state.pending_tool_calls = []
             # 恢复后的新状态也保存一个检查点（版本继续递增）
-            self._persist_and_checkpoint(state, messages, "resume")
+            await self._persist_and_checkpoint(state, messages, "resume")
 
         result = await self._run_with_state(state)
         if resumed_calls:

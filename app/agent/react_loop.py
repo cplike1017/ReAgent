@@ -44,6 +44,14 @@ class LoopHooks:
     after_tool: Callable[[ToolCallRequest, ToolResult, int], Awaitable[None]] | None = None
     # 即将返回最终回答之前（保存"Final Answer 前"检查点）
     before_final: Callable[[LLMResponse, int], Awaitable[None]] | None = None
+    # Context Builder 已生成真正送入模型的输入（ContextBuildResult, step）
+    context_built: Callable[[Any, int], Awaitable[None]] | None = None
+    # Runtime 扩展生命周期：记忆、技能、检查点均为已采集事实，不携带原始敏感正文
+    memory_retrieved: Callable[[str, list[str], str], Awaitable[None]] | None = None
+    skills_selected: Callable[[list[Any]], Awaitable[None]] | None = None
+    checkpoint_saved: Callable[[Any, str], Awaitable[None]] | None = None
+    checkpoint_restored: Callable[[Any], Awaitable[None]] | None = None
+    memory_stored: Callable[[int], Awaitable[None]] | None = None
     # Plan 生命周期：规划结果已生成（plan, version, task）
     plan_created: Callable[[list[Any], int, str], Awaitable[None]] | None = None
     # Plan 无可执行步骤而降级为直接 ReAct（version, task, reason）
@@ -103,6 +111,8 @@ async def run_react_loop(
             )
             llm_messages: list[dict] = built.messages
             request_tools: list[dict] = built.tools or tools_schema
+            if hooks and hooks.context_built:
+                await hooks.context_built(built, steps)
         else:
             llm_messages = messages
             request_tools = tools_schema

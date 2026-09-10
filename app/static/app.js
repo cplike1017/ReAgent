@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v9 */
+/* ReAgent Web UI 前端逻辑 v10 */
 "use strict";
 
 const state = {
@@ -18,6 +18,7 @@ const state = {
   planSnapshots: new Map(),
   planRevisionReasons: new Map(),
   orchestrationRuns: new Map(),
+  executionContext: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -46,6 +47,7 @@ function startExecution(data) {
   state.followLatest = true;
   clearLivePlan();
   clearLiveOrchestrations();
+  clearExecutionContext();
   const title = $("#workspace-title");
   if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
   updateExecutionStatus("running", "执行中", "正在准备执行环境");
@@ -362,6 +364,133 @@ function applyPlanLifecycleEvent(type, payload, timestamp) {
     return true;
   }
   return false;
+}
+
+function createExecutionContextState() {
+  return {
+    memory: null,
+    skills: null,
+    context: null,
+    checkpoint: null,
+    memoryStored: null,
+  };
+}
+
+function clearExecutionContext() {
+  const section = $("#execution-context-section");
+  const list = $("#execution-context");
+  const meta = $("#execution-context-meta");
+  state.executionContext = createExecutionContextState();
+  if (list) list.replaceChildren();
+  if (meta) meta.textContent = "未采集";
+  if (section) section.hidden = true;
+}
+
+function createContextFact(title, value, detail, kind = "") {
+  const item = document.createElement("div");
+  item.className = "execution-context-item" + (kind ? " " + kind : "");
+  const copy = document.createElement("div");
+  copy.className = "execution-context-copy";
+  const heading = document.createElement("strong");
+  heading.textContent = title;
+  const main = document.createElement("span");
+  main.textContent = value;
+  copy.append(heading, main);
+  if (detail) {
+    const extra = document.createElement("span");
+    extra.className = "execution-context-detail";
+    extra.textContent = detail;
+    copy.appendChild(extra);
+  }
+  item.appendChild(copy);
+  return item;
+}
+
+function renderExecutionContext() {
+  const section = $("#execution-context-section");
+  const list = $("#execution-context");
+  const meta = $("#execution-context-meta");
+  if (!section || !list || !meta) return;
+  const facts = state.executionContext || createExecutionContextState();
+  const entries = [];
+  if (facts.memory) entries.push(["记忆检索", String(facts.memory.hitCount) + " 条匹配", facts.memory.purpose === "planning" ? "用于计划生成" : "用于本轮上下文", facts.memory.hitCount ? "success" : ""]);
+  if (facts.skills) entries.push(["技能匹配", facts.skills.count ? facts.skills.names.join("、") : "未匹配技能", facts.skills.count ? String(facts.skills.count) + " 项技能指令已注入" : "未向上下文注入技能指令", ""]);
+  if (facts.context) {
+    const context = facts.context;
+    const detailParts = ["历史 " + String(context.totalHistory) + " → " + String(context.selectedMessages) + " 条"];
+    if (context.retrievedDocuments) detailParts.push(String(context.retrievedDocuments) + " 份参考资料");
+    if (context.hasSummary) detailParts.push("已使用历史摘要");
+    entries.push(["模型上下文", "第 " + String(context.step) + " 轮 · 约 " + String(context.estimatedTokens) + " tokens", detailParts.join(" · "), ""]);
+  }
+  if (facts.checkpoint) {
+    const checkpoint = facts.checkpoint;
+    const action = checkpoint.restored ? "已恢复" : "已保存";
+    entries.push(["执行检查点", action + " v" + String(checkpoint.version), checkpoint.point ? checkpoint.point + " · " + String(checkpoint.status || "") : String(checkpoint.status || ""), checkpoint.restored ? "warning" : ""]);
+  }
+  if (facts.memoryStored) entries.push(["记忆写入", String(facts.memoryStored.count) + " 条已保存", "供后续会话检索", "success"]);
+
+  list.replaceChildren();
+  if (!entries.length) {
+    section.hidden = true;
+    meta.textContent = "未采集";
+    return;
+  }
+  entries.forEach(([title, value, detail, kind]) => list.appendChild(createContextFact(title, value, detail, kind)));
+  section.hidden = false;
+  meta.textContent = String(entries.length) + " 项事实";
+}
+
+function applyRuntimeLifecycleEvent(type, payload, timestamp) {
+  const context = state.executionContext || createExecutionContextState();
+  state.executionContext = context;
+  if (type === "memory.retrieved") {
+    context.memory = {
+      hitCount: Number(payload.hit_count) || 0,
+      purpose: String(payload.purpose || "context"),
+    };
+    appendExecutionEvent("running", "记忆检索完成", String(context.memory.hitCount) + " 条匹配", timestamp);
+  } else if (type === "skill.selected") {
+    context.skills = {
+      count: Number(payload.count) || 0,
+      names: Array.isArray(payload.skills) ? payload.skills.map((item) => String(item)) : [],
+    };
+    appendExecutionEvent("running", context.skills.count ? "已选择技能：" + context.skills.names.join("、") : "未匹配技能", "", timestamp);
+  } else if (type === "context.completed") {
+    context.context = {
+      step: Number(payload.step) || 0,
+      totalHistory: Number(payload.total_history) || 0,
+      selectedMessages: Number(payload.selected_messages) || 0,
+      estimatedTokens: Number(payload.estimated_tokens) || 0,
+      retrievedDocuments: Number(payload.retrieved_documents) || 0,
+      hasSummary: payload.has_summary === true,
+    };
+    appendExecutionEvent(
+      "running",
+      "模型上下文准备完成",
+      "第 " + String(context.context.step || "?") + " 轮 · 约 " + String(context.context.estimatedTokens) + " tokens",
+      timestamp
+    );
+  } else if (type === "checkpoint.saved" || type === "checkpoint.restored") {
+    context.checkpoint = {
+      version: Number(payload.checkpoint_version) || 0,
+      status: String(payload.state_status || ""),
+      point: String(payload.point || ""),
+      restored: type === "checkpoint.restored",
+    };
+    appendExecutionEvent(
+      type === "checkpoint.restored" ? "warning" : "running",
+      type === "checkpoint.restored" ? "已恢复执行检查点" : "已保存执行检查点",
+      "v" + String(context.checkpoint.version) + (context.checkpoint.point ? " · " + context.checkpoint.point : ""),
+      timestamp
+    );
+  } else if (type === "memory.stored") {
+    context.memoryStored = { count: Number(payload.stored_count) || 0 };
+    appendExecutionEvent("success", "记忆提炼完成", String(context.memoryStored.count) + " 条已保存", timestamp);
+  } else {
+    return false;
+  }
+  renderExecutionContext();
+  return true;
 }
 
 function orchestrationStateName(status) {
@@ -895,6 +1024,7 @@ function replayExecution(record, events) {
   state.executionTools = 0;
   clearLivePlan();
   clearLiveOrchestrations();
+  clearExecutionContext();
 
   const title = $("#workspace-title");
   if (title) title.textContent = truncateForWorkspace(record.input_preview || "历史执行");
@@ -920,7 +1050,7 @@ function replayExecutionEvent(event) {
   const timestamp = event.timestamp;
   const type = event.event_type;
 
-  if (applyOrchestrationLifecycleEvent(type, payload, timestamp) || applyPlanLifecycleEvent(type, payload, timestamp)) return;
+  if (applyRuntimeLifecycleEvent(type, payload, timestamp) || applyOrchestrationLifecycleEvent(type, payload, timestamp) || applyPlanLifecycleEvent(type, payload, timestamp)) return;
 
   if (type === "llm.started") {
     appendExecutionEvent("running", "模型开始决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
@@ -2200,7 +2330,7 @@ function handleFrame(frame, contentEl, onComplete) {
   let data;
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
-  if (applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
+  if (applyRuntimeLifecycleEvent(event, data, data.timestamp) || applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
 
   switch (event) {
     case "execution.started":

@@ -342,6 +342,66 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 {"step": step, "content": response.content or ""},
             )
 
+        async def _hook_context_built(built, step: int) -> None:
+            await _emit(
+                "context.completed",
+                {
+                    "step": step,
+                    "total_history": built.total_history,
+                    "selected_messages": built.selected,
+                    "estimated_tokens": built.estimated_tokens,
+                    "tool_schema_count": len(built.tools),
+                    "retrieved_documents": built.retrieved_documents,
+                    "has_summary": built.summary is not None,
+                    "summary_length": len(built.summary or ""),
+                },
+            )
+
+        async def _hook_memory_retrieved(_query: str, docs: list[str], purpose: str) -> None:
+            # 事件只记录命中规模和用途；查询与记忆正文不因透明化而额外落库。
+            await _emit(
+                "memory.retrieved",
+                {
+                    "purpose": purpose,
+                    "hit_count": len(docs),
+                },
+            )
+
+        async def _hook_skills_selected(skills: list) -> None:
+            await _emit(
+                "skill.selected",
+                {
+                    "count": len(skills),
+                    "skills": [skill.name for skill in skills],
+                },
+            )
+
+        async def _hook_checkpoint_saved(checkpoint, point: str) -> None:
+            await _emit(
+                "checkpoint.saved",
+                {
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "checkpoint_version": checkpoint.version,
+                    "state_step": checkpoint.step,
+                    "state_status": (checkpoint.state or {}).get("status", ""),
+                    "point": point,
+                },
+            )
+
+        async def _hook_checkpoint_restored(checkpoint) -> None:
+            await _emit(
+                "checkpoint.restored",
+                {
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "checkpoint_version": checkpoint.version,
+                    "state_step": checkpoint.step,
+                    "state_status": (checkpoint.state or {}).get("status", ""),
+                },
+            )
+
+        async def _hook_memory_stored(count: int) -> None:
+            await _emit("memory.stored", {"stored_count": count})
+
         async def _hook_plan_created(plan, plan_version: int, task: str) -> None:
             await _emit(
                 "plan.created",
@@ -611,6 +671,12 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
             before_final=_hook_before_final,
+            context_built=_hook_context_built,
+            memory_retrieved=_hook_memory_retrieved,
+            skills_selected=_hook_skills_selected,
+            checkpoint_saved=_hook_checkpoint_saved,
+            checkpoint_restored=_hook_checkpoint_restored,
+            memory_stored=_hook_memory_stored,
             plan_created=_hook_plan_created,
             plan_degraded=_hook_plan_degraded,
             plan_step_started=_hook_plan_step_started,

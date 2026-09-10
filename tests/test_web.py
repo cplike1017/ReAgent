@@ -106,6 +106,7 @@ def test_web_index(tmp_path):
         assert 'id="toggle-navigation"' in r.text
         assert 'id="jump-latest"' in r.text
         assert 'id="live-orchestration-section"' in r.text
+        assert 'id="execution-context-section"' in r.text
 
 
 def test_web_capabilities(tmp_path):
@@ -198,6 +199,59 @@ def test_web_chat_stream_sse(tmp_path):
             assert "event: step" in body
             assert "event: tool_result" in body
             assert "event: done" in body
+
+
+def test_web_streams_context_memory_skill_and_checkpoint_events(tmp_path):
+    """透明化事件只公开实际统计与标识，不泄漏记忆正文或 Prompt。"""
+    class EventMemory:
+        async def retrieve(self, query, *, session_id=None):
+            return ["不应通过 SSE 公开的记忆正文"]
+
+        async def remember(self, messages, *, session_id="", turn_id=""):
+            return [object(), object()]
+
+        def close(self):
+            pass
+
+    with TestClient(_make_app(tmp_path)) as client:
+        runtime = client.app.state.runtime
+        runtime.memory = EventMemory()
+        runtime.settings.memory_auto_extract = True
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "请进行数据分析", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        assert {"memory.retrieved", "skill.selected", "context.completed", "checkpoint.saved", "memory.stored"} <= set(names)
+        assert names.index("memory.retrieved") < names.index("context.completed")
+        assert names.index("skill.selected") < names.index("context.completed")
+        assert names.index("checkpoint.saved") < names.index("llm.started")
+
+        memory = next(data for name, data in events if name == "memory.retrieved")
+        skills = next(data for name, data in events if name == "skill.selected")
+        context = next(data for name, data in events if name == "context.completed")
+        checkpoints = [data for name, data in events if name == "checkpoint.saved"]
+        stored = next(data for name, data in events if name == "memory.stored")
+        assert memory["hit_count"] == 1
+        assert skills["count"] == 1
+        assert skills["skills"] == ["data_analysis"]
+        assert context["retrieved_documents"] >= 2  # 记忆 + 选中的技能指令
+        assert context["selected_messages"] >= 1
+        assert context["estimated_tokens"] > 0
+        assert checkpoints[0]["point"] == "before_llm"
+        assert [item["checkpoint_version"] for item in checkpoints] == sorted(item["checkpoint_version"] for item in checkpoints)
+        assert stored["stored_count"] == 2
+
+        stored_events = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        serialized = json.dumps([event["payload"] for event in stored_events], ensure_ascii=False)
+        assert "不应通过 SSE 公开的记忆正文" not in serialized
+        assert [event["event_type"] for event in stored_events] == names
+
 
 
 def test_web_plan_streams_lifecycle_events(tmp_path):

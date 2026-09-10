@@ -40,6 +40,7 @@ class ContextBuildResult(BaseModel):
     selected: int = Field(description="实际选中的消息条数（不含 system / 摘要）")
     summary: str | None = Field(default=None, description="生成的摘要（未触发压缩则为 None）")
     estimated_tokens: int = Field(description="估算的 token 数")
+    retrieved_documents: int = Field(default=0, description="已注入的检索/技能参考条目数（不含正文）")
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,7 @@ class ContextBuilder:
             selected=len(recent),
             summary=summary,
             estimated_tokens=estimate_messages_tokens(messages),
+            retrieved_documents=len(retrieved_docs or []),
         )
 
     # ------------------------------------------------------------------

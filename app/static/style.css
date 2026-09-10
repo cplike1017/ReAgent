@@ -1023,6 +1023,16 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .live-agent-copy .live-agent-result { color: var(--text); }
 .live-agent-copy .live-agent-tool { color: var(--text-muted); }
 .live-agent-copy .live-agent-error { color: var(--danger); }
+.execution-context { display: grid; max-height: 228px; gap: 6px; overflow: auto; }
+.execution-context-item { padding: 7px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+.execution-context-item.success { border-color: color-mix(in srgb, var(--success) 32%, var(--border)); }
+.execution-context-item.warning { border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.execution-context-copy { min-width: 0; }
+.execution-context-copy strong,
+.execution-context-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.execution-context-copy strong { color: var(--text-muted); font-size: 10px; font-weight: 680; }
+.execution-context-copy span { margin-top: 2px; color: var(--text); font-size: 11px; line-height: 1.35; }
+.execution-context-copy .execution-context-detail { color: var(--text-subtle); font-size: 10px; }
 .inspector-note { margin-top: auto; padding-top: 13px; border-top: 1px solid var(--border); }
 .inspector-note h3 { margin: 0; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .inspector-note p { margin: 5px 0 0; color: var(--text-subtle); font-size: 11px; line-height: 1.55; }
