@@ -4,7 +4,7 @@
 Bring the local ReAgent checkout up to date with `origin/main`, apply the supplied environment configuration in the project-prescribed location, and start and verify the service.
 
 ## Current Phase
-Frontend implementation: final regression and delivery (2026-09-11)
+Frontend implementation: publication blocked by network transport (2026-09-11)
 
 ## Frontend implementation — current request
 
@@ -52,6 +52,7 @@ Frontend implementation: final regression and delivery (2026-09-11)
 ## Delivery Status
 - Service configuration, dependency setup, startup, and verification are complete.
 - Source synchronization remains blocked: terminal Git transport could not connect to `github.com:443` in three distinct attempts, so the checkout remains at commit `894140bc0bc90e2967263e42db2a74c26f15f497` (2026-09-07). No pull occurred.
+- Frontend implementation is committed locally as `8e50773` on `codex/frontend-execution-ux`. Its push is currently blocked by a GitHub HTTPS connection reset; SSH authentication is unavailable on this machine, and the authenticated GitHub API upload path timed out before creating a branch reference. No remote branch was created or overwritten.
 
 ## Decisions Made
 | Decision | Rationale |

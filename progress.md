@@ -100,3 +100,10 @@
 - Verified browser states with a local isolated fixture: successful ReAct execution, duplicate tool calls, tool failure, cancellation, HTTP failure, Markdown sanitization, trace folding, history replay, parallel orchestration, and mobile drawer behavior.
 - Final checks: `node --check app/static/app.js` passed; focused static/API tests passed; full `pytest -q` suite passed with **260 passed** and one third-party Starlette deprecation warning.
 - Browser screenshots and Playwright cache remain local under ignored `output/playwright/` and `.playwright-cli/`; no credentials, audit fixtures, screenshots, or runtime data are included in the planned commit.
+
+## Publication attempt (2026-09-11)
+
+- Created local implementation commit `8e50773` (`feat(web): improve execution visualization and theme`) on `codex/frontend-execution-ux` after a clean staged diff check.
+- `git push -u origin codex/frontend-execution-ux` failed once with `Recv failure: Connection was reset`; no retry of the same transport was performed.
+- Verified that GitHub SSH authentication is unavailable (`Permission denied (publickey)`). GitHub CLI is authenticated with repository write scope, but the API upload fallback timed out during TLS handshake before a tree, commit, or branch reference could be created.
+- Publication is therefore blocked by the current host's outbound GitHub transport; the commit and all implementation files remain intact locally and the existing remote `main` branch was not modified.
