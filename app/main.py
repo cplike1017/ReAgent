@@ -118,6 +118,8 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         # 现有 AgentRuntime 保存了回合级可变状态，直连 Web 模式先串行化执行，
         # 防止不同会话的模式、钩子和工具结果相互串扰。
         app.state.web_runtime_lock = asyncio.Lock()
+        # 直连 Web 运行任务按 execution_id 保存，供断线续接和显式取消使用。
+        app.state.web_execution_tasks = {}
 
         # 5) 后台预初始化 MCP（不阻塞 Web 启动；工具在后台陆续注册）
         mcp_task = None
@@ -141,6 +143,14 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         if mcp_task is not None and not mcp_task.done():
             mcp_task.cancel()
             await asyncio.gather(mcp_task, return_exceptions=True)
+        # SSE 客户端断开后，执行任务仍可能在后台运行。先取消并等待它们，
+        # 再关闭 MCP、记忆和 SQLite，避免任务使用已经释放的运行时资源。
+        web_tasks = list(getattr(app.state, "web_execution_tasks", {}).values())
+        for task in web_tasks:
+            if not task.done():
+                task.cancel()
+        if web_tasks:
+            await asyncio.gather(*web_tasks, return_exceptions=True)
         if app.state.runtime.mcp_client is not None:
             # 关闭 MCP：尽力清理并抑制 SDK 跨 task 噪音（捕获 BaseExceptionGroup）
             await _quiet_mcp_close(app.state.runtime.mcp_client)

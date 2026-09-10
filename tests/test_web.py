@@ -10,6 +10,7 @@ import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.execution.models import ExecutionStatus
 from app.main import create_app
 
 
@@ -174,6 +175,84 @@ def test_web_stream_persists_execution_events(tmp_path):
             f"/api/web/sessions/{done['session_id']}/executions"
         ).json()
         assert any(run["execution_id"] == header_execution_id for run in session_runs["executions"])
+
+
+def test_web_execution_stream_replays_all_terminal_events(tmp_path):
+    """终态运行可从 SSE 回放端点按 seq 完整重放。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "计算 123 * 456", "agent_mode": "react"},
+        ) as response:
+            execution_id = response.headers["x-execution-id"]
+            _ = "".join(response.iter_text())
+
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()
+        replay = client.get(f"/api/web/executions/{execution_id}/stream?after_seq=0")
+        assert replay.status_code == 200
+        assert "event: execution.started" in replay.text
+        assert "event: execution.completed" in replay.text
+        assert f"id: {stored['last_seq']}" in replay.text
+
+        exhausted = client.get(
+            f"/api/web/executions/{execution_id}/stream?after_seq={stored['last_seq']}"
+        )
+        assert exhausted.status_code == 200
+        assert exhausted.text == ""
+
+
+def test_web_execution_stream_replays_more_than_one_event_page(tmp_path):
+    """终态记录超过默认单页上限时，SSE 回放不能遗漏后续事件。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        repository = client.app.state.execution_repository
+        repository.create(
+            execution_id="exec_many_events",
+            session_id="session_many_events",
+            turn_id="turn_many_events",
+            agent_mode="react",
+            input_preview="多页回放",
+        )
+        for index in range(501):
+            repository.append_event("exec_many_events", "progress", {"index": index})
+        repository.finish("exec_many_events", status=ExecutionStatus.SUCCEEDED)
+
+        replay = client.get("/api/web/executions/exec_many_events/stream")
+        assert replay.status_code == 200
+        assert replay.text.count("event: progress") == 501
+        assert "id: 501" in replay.text
+
+
+def test_web_execution_cancel_without_active_task_is_terminal_and_idempotent(tmp_path):
+    """失去运行任务的记录可被明确取消，重复取消不新增状态转换。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        repository = client.app.state.execution_repository
+        repository.create(
+            execution_id="exec_orphaned",
+            session_id="session_orphaned",
+            turn_id="turn_orphaned",
+            agent_mode="react",
+            input_preview="待取消任务",
+        )
+
+        cancelled = client.post("/api/web/executions/exec_orphaned/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json() == {
+            "execution_id": "exec_orphaned",
+            "status": "CANCELLED",
+            "cancel_requested": False,
+        }
+        snapshot = client.get("/api/web/executions/exec_orphaned").json()
+        assert snapshot["status"] == "CANCELLED"
+        event_types = [
+            event["event_type"]
+            for event in client.get("/api/web/executions/exec_orphaned/events").json()["events"]
+        ]
+        assert event_types == ["execution.cancel_requested", "execution.cancelled"]
+
+        repeated = client.post("/api/web/executions/exec_orphaned/cancel")
+        assert repeated.json()["cancel_requested"] is False
+        assert repeated.json()["status"] == "CANCELLED"
 
 
 def test_web_sessions(tmp_path):

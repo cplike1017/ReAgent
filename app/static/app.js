@@ -11,6 +11,7 @@ const state = {
   executionTimer: null,
   executionSteps: 0,
   executionTools: 0,
+  executionHistory: [],
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -31,6 +32,7 @@ function setConnStatus(online) {
 function startExecution(data) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || state.executionId;
+  if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
   state.executionSteps = 0;
   state.executionTools = 0;
@@ -98,7 +100,7 @@ function truncateForWorkspace(value) {
   return text.length > 46 ? text.slice(0, 45) + "…" : text;
 }
 
-function appendExecutionEvent(kind, title, detail) {
+function appendExecutionEvent(kind, title, detail, timestamp) {
   const list = $("#execution-timeline");
   if (!list) return;
   const empty = list.querySelector(".timeline-empty");
@@ -118,7 +120,7 @@ function appendExecutionEvent(kind, title, detail) {
   }
   const time = document.createElement("time");
   time.className = "timeline-time";
-  time.textContent = new Date().toLocaleTimeString("zh-CN", {
+  time.textContent = new Date(timestamp || Date.now()).toLocaleTimeString("zh-CN", {
     hour: "2-digit", minute: "2-digit", second: "2-digit",
   });
   item.appendChild(time);
@@ -172,6 +174,275 @@ function renderLivePlan(plan, revisions) {
     list.appendChild(item);
   });
 }
+
+function renderExecutionHistory(records) {
+  state.executionHistory = Array.isArray(records) ? records : [];
+  const container = $("#execution-history");
+  const count = $("#execution-history-count");
+  if (!container || !count) return;
+  count.textContent = String(state.executionHistory.length);
+  container.replaceChildren();
+
+  if (!state.executionHistory.length) {
+    const empty = document.createElement("p");
+    empty.className = "timeline-empty";
+    empty.textContent = "当前会话还没有可回放的执行记录。";
+    container.appendChild(empty);
+    return;
+  }
+
+  state.executionHistory.forEach((record) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "execution-history-item";
+    item.dataset.executionId = record.execution_id;
+    if (record.execution_id === state.executionId) item.classList.add("active");
+
+    const title = document.createElement("span");
+    title.className = "execution-history-title";
+    title.textContent = record.input_preview || record.execution_id;
+
+    const meta = document.createElement("span");
+    meta.className = "execution-history-meta";
+    meta.textContent = formatMode(record.agent_mode) + " · " + formatStoredStatus(record.status)
+      + (record.created_at ? " · " + formatStoredTime(record.created_at) : "");
+
+    item.append(title, meta);
+    item.addEventListener("click", () => openExecutionHistory(record.execution_id));
+    container.appendChild(item);
+  });
+}
+
+function formatStoredStatus(status) {
+  const labels = {
+    RUNNING: "执行中",
+    SUCCEEDED: "已完成",
+    FAILED: "失败",
+    CANCELLED: "已取消",
+    INTERRUPTED: "已中断",
+  };
+  return labels[status] || status || "未知";
+}
+
+function formatStoredTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+
+async function loadExecutionHistory(sessionId) {
+  const container = $("#execution-history");
+  if (!sessionId) {
+    renderExecutionHistory([]);
+    return;
+  }
+  try {
+    const response = await fetch("/api/web/sessions/" + encodeURIComponent(sessionId) + "/executions");
+    if (!response.ok) throw new Error("HTTP " + String(response.status));
+    const data = await response.json();
+    renderExecutionHistory(data.executions || []);
+  } catch (error) {
+    if (container) {
+      container.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "timeline-empty";
+      message.textContent = "无法读取执行记录：" + error.message;
+      container.appendChild(message);
+    }
+  }
+}
+
+async function fetchAllExecutionEvents(executionId) {
+  const events = [];
+  let afterSeq = 0;
+  while (true) {
+    const response = await fetch(
+      "/api/web/executions/" + encodeURIComponent(executionId)
+        + "/events?after_seq=" + String(afterSeq) + "&limit=1000"
+    );
+    if (!response.ok) throw new Error("执行事件读取失败");
+    const page = await response.json();
+    const batch = page.events || [];
+    events.push(...batch);
+    if (!batch.length || afterSeq >= Number(page.last_seq || 0)) break;
+    afterSeq = Number(batch[batch.length - 1].seq || afterSeq);
+    if (afterSeq >= Number(page.last_seq || 0)) break;
+  }
+  return events;
+}
+
+async function openExecutionHistory(executionId) {
+  try {
+    const response = await fetch("/api/web/executions/" + encodeURIComponent(executionId));
+    if (!response.ok) throw new Error("执行记录读取失败");
+    const record = await response.json();
+    const events = await fetchAllExecutionEvents(executionId);
+    replayExecution(record, events);
+    renderExecutionHistory(state.executionHistory);
+    if (record.status === "RUNNING") {
+      resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0);
+    }
+  } catch (error) {
+    addErrorMsg("加载执行记录失败: " + error.message);
+  }
+}
+
+async function resumeExecutionEvents(record, afterSeq) {
+  // 已有浏览器流在消费该执行时不再创建第二个订阅，避免时间线重复。
+  if (state.streaming) return;
+  const controller = new AbortController();
+  state.abortCtrl = controller;
+  state.streaming = true;
+  $("#send").disabled = true;
+  const stop = $("#stop");
+  if (stop) {
+    stop.disabled = false;
+    stop.style.display = "block";
+  }
+
+  try {
+    const response = await fetch(
+      "/api/web/executions/" + encodeURIComponent(record.execution_id)
+        + "/stream?after_seq=" + String(afterSeq),
+      { signal: controller.signal }
+    );
+    if (!response.ok) throw new Error("HTTP " + String(response.status));
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let index;
+      while ((index = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, index);
+        buffer = buffer.slice(index + 2);
+        replayExecutionFrame(frame);
+      }
+    }
+    const snapshotResponse = await fetch("/api/web/executions/" + encodeURIComponent(record.execution_id));
+    if (snapshotResponse.ok) {
+      const snapshot = await snapshotResponse.json();
+      if (snapshot.status !== "RUNNING") {
+        const finalEvents = await fetchAllExecutionEvents(record.execution_id);
+        replayExecution(snapshot, finalEvents);
+        if (snapshot.session_id) openSession(snapshot.session_id);
+      }
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") addErrorMsg("续接执行事件失败: " + error.message);
+  } finally {
+    if (state.executionId === record.execution_id) {
+      $("#stop").style.display = "none";
+      setStreaming(false);
+      loadExecutionHistory(record.session_id);
+    }
+  }
+}
+
+function replayExecutionFrame(frame) {
+  const lines = frame.split("\n");
+  const eventLine = lines.find((line) => line.startsWith("event:"));
+  const dataLine = lines.find((line) => line.startsWith("data:"));
+  if (!eventLine || !dataLine) return;
+  try {
+    const payload = JSON.parse(dataLine.slice(5).trim());
+    replayExecutionEvent({
+      event_type: eventLine.slice(6).trim(),
+      payload,
+      timestamp: payload.timestamp,
+    });
+  } catch (error) {
+    // 单条回放数据异常不应中断后续可用事件。
+  }
+}
+
+function replayExecution(record, events) {
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionId = record.execution_id;
+  state.sessionId = record.session_id || state.sessionId;
+  state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
+  state.executionSteps = 0;
+  state.executionTools = 0;
+
+  const title = $("#workspace-title");
+  if (title) title.textContent = truncateForWorkspace(record.input_preview || "历史执行");
+  const timeline = $("#execution-timeline");
+  if (timeline) timeline.replaceChildren();
+  $("#timeline-count").textContent = "0";
+  updateExecutionStatus("running", "回放中", "正在还原已采集的执行事件");
+
+  events.forEach((event) => replayExecutionEvent(event));
+  const status = record.status;
+  if (status === "SUCCEEDED") finishExecution("success", "历史执行已完成");
+  else if (status === "FAILED" || status === "INTERRUPTED") finishExecution("error", status === "INTERRUPTED" ? "执行被服务重启中断" : "历史执行失败");
+  else if (status === "CANCELLED") finishExecution("cancelled", "历史执行已取消");
+  else {
+    updateExecutionStatus("running", "执行中", "该运行仍在执行；可通过事件流继续接续");
+    state.executionTimer = window.setInterval(renderExecutionMetrics, 500);
+  }
+  renderExecutionMetrics();
+}
+
+function replayExecutionEvent(event) {
+  const payload = event.payload || {};
+  const timestamp = event.timestamp;
+  const type = event.event_type;
+
+  if (type === "llm.started") {
+    appendExecutionEvent("running", "模型开始决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
+    return;
+  }
+  if (type === "step") {
+    state.executionSteps = Math.max(state.executionSteps, Number(payload.step) || 0);
+    appendExecutionEvent("running", "模型完成决策", payload.is_final ? "正在组织最终回答" : "已确定下一步", timestamp);
+    return;
+  }
+  if (type === "tool.started") {
+    appendExecutionEvent("running", "开始调用工具：" + String(payload.tool || ""), "", timestamp);
+    return;
+  }
+  if (type === "tool_result") {
+    state.executionTools += 1;
+    appendExecutionEvent(
+      payload.success === false ? "error" : "success",
+      payload.success === false ? "工具执行失败：" + String(payload.tool || "") : "工具执行完成：" + String(payload.tool || ""),
+      payload.duration_ms != null ? "耗时 " + formatMs(payload.duration_ms) : "",
+      timestamp
+    );
+    return;
+  }
+  if (type === "final") {
+    appendExecutionEvent("running", "已生成最终回答", "等待执行记录归档", timestamp);
+    return;
+  }
+  if (type === "done") {
+    renderLivePlan(payload.plan, payload.plan_revisions);
+    appendExecutionEvent("success", "任务已完成", "", timestamp);
+    return;
+  }
+  if (type === "execution.cancel_requested") {
+    appendExecutionEvent("warning", "已请求停止", "等待服务端确认", timestamp);
+    return;
+  }
+  if (type === "execution.cancelled") {
+    appendExecutionEvent("warning", "服务端确认已取消", "", timestamp);
+    return;
+  }
+  if (type === "execution.failed") {
+    appendExecutionEvent("error", "执行失败", payload.message || "", timestamp);
+    return;
+  }
+  if (type === "execution.completed") {
+    appendExecutionEvent("success", "执行记录已保存", payload.trace_id ? "Trace " + String(payload.trace_id).slice(-12) : "", timestamp);
+    return;
+  }
+  if (type === "execution.started") {
+    appendExecutionEvent("running", "任务已受理", payload.mode ? "模式：" + formatMode(payload.mode) : "", timestamp);
+  }
+}
+
 
 /* ================= 能力列表 ================= */
 async function loadCapabilities() {
@@ -329,6 +600,7 @@ async function openSession(sessionId) {
     addErrorMsg("加载会话失败: " + e.message);
   }
   loadOrchestrations(sessionId);
+  loadExecutionHistory(sessionId);
 }
 
 /* ================= 编排记录（委派结果持久化） ================= */
@@ -527,6 +799,7 @@ function newSession() {
   // 清空编排记录列表
   $("#orch-list").innerHTML = "";
   $("#orch-count").textContent = "0";
+  renderExecutionHistory([]);
   setStatus("新会话");
 }
 
@@ -1059,7 +1332,10 @@ async function send() {
   setStreaming(false);
   loadSessions();
   // 编排记录可能新增（delegate 工具）
-  if (state.sessionId) loadOrchestrations(state.sessionId);
+  if (state.sessionId) {
+    loadOrchestrations(state.sessionId);
+    loadExecutionHistory(state.sessionId);
+  }
 }
 
 function ensureCopyButton(assistantEl, content) {
@@ -1139,6 +1415,15 @@ function handleFrame(frame, contentEl, onComplete) {
       finishExecution("success", "执行记录已保存");
       appendExecutionEvent("success", "执行记录已保存", data.trace_id ? "Trace " + String(data.trace_id).slice(-12) : "");
       break;
+    case "execution.cancel_requested":
+      updateExecutionStatus("running", "停止请求已发送", "正在等待服务端确认取消");
+      appendExecutionEvent("warning", "已请求停止", "等待服务端确认");
+      break;
+    case "execution.cancelled":
+      if (!contentEl.textContent.trim()) contentEl.textContent = "⏹ 服务端已确认取消执行。";
+      finishExecution("cancelled", "服务端已确认停止");
+      appendExecutionEvent("warning", "服务端确认已取消", "");
+      break;
     case "error":
       addErrorMsg(data.message);
       finishExecution("error", "Agent 返回错误");
@@ -1156,10 +1441,31 @@ function setStreaming(v) {
   if (!v) state.abortCtrl = null;
 }
 
-function stopStreaming() {
-  if (state.abortCtrl) {
+async function stopStreaming() {
+  if (!state.abortCtrl) return;
+  const button = $("#stop");
+  if (!state.executionId) {
     state.abortCtrl.abort();
-    $("#stop").style.display = "none";
+    button.style.display = "none";
+    return;
+  }
+
+  button.disabled = true;
+  updateExecutionStatus("running", "停止请求已发送", "正在等待服务端确认取消");
+  appendExecutionEvent("warning", "已请求停止", "服务端确认后将结束执行");
+  try {
+    const response = await fetch(
+      "/api/web/executions/" + encodeURIComponent(state.executionId) + "/cancel",
+      { method: "POST" }
+    );
+    if (!response.ok) throw new Error("HTTP " + String(response.status));
+    const data = await response.json();
+    if (!data.cancel_requested && data.status !== "RUNNING") {
+      finishExecution("cancelled", "服务端已确认停止");
+    }
+  } catch (error) {
+    button.disabled = false;
+    addErrorMsg("停止请求失败: " + error.message);
   }
 }
 

@@ -860,6 +860,34 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .inspector-heading { justify-content: space-between; gap: 8px; margin-bottom: 9px; }
 .inspector-heading h3,
 .inspector-section > h3 { color: var(--text-muted); }
+.execution-history { display: grid; max-height: 154px; gap: 5px; overflow: auto; }
+.execution-history .timeline-empty { margin: 0; padding: 7px 2px; }
+.execution-history-item {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface-subtle);
+  cursor: pointer;
+  text-align: left;
+}
+.execution-history-item:hover,
+.execution-history-item.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  background: var(--accent-soft);
+}
+.execution-history-title,
+.execution-history-meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.execution-history-title { font-size: 11px; font-weight: 680; }
+.execution-history-meta { margin-top: 2px; color: var(--text-muted); font-size: 10px; }
+
 .execution-timeline {
   min-height: 0;
   max-height: min(43vh, 430px);

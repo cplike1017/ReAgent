@@ -240,6 +240,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
 
     async def event_gen() -> AsyncIterator[str]:
         queue: asyncio.Queue = asyncio.Queue()
+        client_connected = True
 
         async def _emit(event_type: str, payload: dict) -> None:
             recorded = repository.append_event(execution_id, event_type, payload)
@@ -249,7 +250,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 turn_id=turn_id,
                 payload=payload,
             )
-            await queue.put(_sse(event_type, data, recorded.seq))
+            if client_connected:
+                await queue.put(_sse(event_type, data, recorded.seq))
 
         async def _hook_before_llm(step: int, messages: list[dict]) -> None:
             await _emit(
@@ -322,6 +324,9 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
 
         async def _run() -> None:
             try:
+                current = repository.get(execution_id)
+                if current is None or current.status != ExecutionStatus.RUNNING:
+                    return
                 await _emit(
                     "execution.started",
                     {
@@ -374,7 +379,11 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     execution_id,
                     status=ExecutionStatus.CANCELLED,
                     error_type="CancelledError",
-                    error_message="客户端取消了流式执行。",
+                    error_message="用户取消了执行。",
+                )
+                await _emit(
+                    "execution.cancelled",
+                    {"message": "服务端已确认取消执行。"},
                 )
                 raise
             except AgentError as exc:
@@ -396,9 +405,40 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 await _emit("error", {"type": type(exc).__name__, "message": str(exc)})
                 await _emit("execution.failed", {"type": type(exc).__name__, "message": str(exc)})
             finally:
+                app.web_execution_tasks.pop(execution_id, None)
+                if client_connected:
+                    await queue.put(None)
+
+        async def _confirm_cancelled_before_start() -> None:
+            """覆盖 task.cancel() 发生在协程首次调度之前的极早取消窗口。"""
+            record = repository.get(execution_id)
+            if record is None or record.status != ExecutionStatus.RUNNING:
+                return
+            finished = repository.finish(
+                execution_id,
+                status=ExecutionStatus.CANCELLED,
+                error_type="CancelledBeforeStart",
+                error_message="用户在执行任务启动前取消了请求。",
+            )
+            if finished.status != ExecutionStatus.CANCELLED:
+                return
+            await _emit(
+                "execution.cancelled",
+                {"message": "服务端已确认取消执行。"},
+            )
+            app.web_execution_tasks.pop(execution_id, None)
+            if client_connected:
                 await queue.put(None)
 
         task = asyncio.create_task(_run())
+        app.web_execution_tasks[execution_id] = task
+
+        def _handle_task_done(completed_task: asyncio.Task) -> None:
+            # _run 捕获取消时会自行记账；若它从未获得运行机会，这里补写终态。
+            if completed_task.cancelled():
+                asyncio.create_task(_confirm_cancelled_before_start())
+
+        task.add_done_callback(_handle_task_done)
         try:
             while True:
                 item = await queue.get()
@@ -406,9 +446,11 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     break
                 yield item
         finally:
-            if not task.done():
-                task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            # 断开 SSE 仅停止当前订阅；任务继续运行并持续写入 SQLite，
+            # 用户可通过 execution_id 从事件序列重新接续。
+            client_connected = False
+            if task.done():
+                await asyncio.gather(task, return_exceptions=True)
 
     return StreamingResponse(
         event_gen(),
@@ -454,6 +496,96 @@ async def web_session_executions(
     return {
         "session_id": session_id,
         "executions": [record.model_dump(mode="json") for record in records],
+    }
+
+
+@router.get("/executions/{execution_id}/stream")
+async def web_execution_stream(
+    execution_id: str,
+    request: Request,
+    after_seq: int = 0,
+) -> StreamingResponse:
+    """从持久化事件序列回放，并在运行中以短轮询方式续接新事件。"""
+    repository = _get_execution_repository(request)
+    initial = repository.get(execution_id)
+    if initial is None:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+
+    async def replay() -> AsyncIterator[str]:
+        current_seq = max(0, after_seq)
+        while True:
+            record = repository.get(execution_id)
+            if record is None:
+                return
+            events = repository.list_events(execution_id, after_seq=current_seq)
+            for event in events:
+                current_seq = event.seq
+                payload = _event_data(
+                    event,
+                    session_id=record.session_id,
+                    turn_id=record.turn_id,
+                    payload=event.payload,
+                )
+                yield _sse(event.event_type, payload, event.seq)
+
+            record = repository.get(execution_id)
+            if record is None:
+                return
+            # 终态也可能有多页事件：先完整吐完 seq，再结束流。
+            if current_seq < record.last_seq:
+                continue
+            if record.status != ExecutionStatus.RUNNING:
+                return
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(0.35)
+
+    return StreamingResponse(
+        replay(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@router.post("/executions/{execution_id}/cancel")
+async def web_execution_cancel(execution_id: str, request: Request) -> dict:
+    """请求取消直连 Web 执行；终态记录保持幂等。"""
+    repository = _get_execution_repository(request)
+    record = repository.get(execution_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+    if record.status != ExecutionStatus.RUNNING:
+        return {
+            "execution_id": execution_id,
+            "status": record.status.value,
+            "cancel_requested": False,
+        }
+
+    repository.append_event(execution_id, "execution.cancel_requested", {})
+    task = getattr(request.app.state, "web_execution_tasks", {}).get(execution_id)
+    if task is not None and not task.done():
+        task.cancel()
+        return {
+            "execution_id": execution_id,
+            "status": ExecutionStatus.RUNNING.value,
+            "cancel_requested": True,
+        }
+
+    # 没有活动任务时不能继续执行；直接落入已取消终态，避免永久显示运行中。
+    repository.finish(
+        execution_id,
+        status=ExecutionStatus.CANCELLED,
+        error_type="NoActiveTask",
+        error_message="未找到活动执行任务。",
+    )
+    repository.append_event(
+        execution_id,
+        "execution.cancelled",
+        {"message": "未找到活动任务，已结束该执行记录。"},
+    )
+    return {
+        "execution_id": execution_id,
+        "status": ExecutionStatus.CANCELLED.value,
+        "cancel_requested": False,
     }
 
 
