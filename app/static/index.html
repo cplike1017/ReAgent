@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=6">
+<link rel="stylesheet" href="/style.css?v=7">
 </head>
 <body data-theme="light">
 <div class="app-shell">
-  <aside class="sidebar" aria-label="会话与能力导航">
+  <aside class="sidebar" id="primary-navigation" aria-label="会话与能力导航">
     <div class="brand">
       <div class="brand-lockup">
         <span class="brand-mark" aria-hidden="true">R</span>
@@ -82,6 +82,7 @@
       </details>
     </div>
   </aside>
+  <button id="navigation-backdrop" class="drawer-backdrop navigation-backdrop" type="button" aria-label="关闭会话导航" aria-hidden="true" tabindex="-1"></button>
 
   <main class="main">
     <header class="chat-header">
@@ -95,10 +96,12 @@
         </div>
       </div>
       <div class="header-actions">
+        <button id="toggle-navigation" class="icon-btn mobile-nav-toggle" type="button" title="打开会话导航" aria-label="打开会话导航" aria-controls="primary-navigation" aria-expanded="false">☰</button>
         <div class="mode-switch" role="group" aria-label="执行模式">
           <button class="mode-btn active" data-mode="react" type="button">ReAct</button>
           <button class="mode-btn" data-mode="plan" type="button">Plan</button>
         </div>
+        <button id="open-inspector" class="inspector-launch" type="button" title="查看执行过程" aria-label="查看执行过程" aria-controls="execution-panel" aria-expanded="true"><span aria-hidden="true">◫</span><span class="inspector-launch-label">执行过程</span></button>
         <button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换深浅主题">◐</button>
       </div>
     </header>
@@ -138,13 +141,14 @@
         </div>
       </section>
 
-      <aside class="execution-panel" id="execution-panel" aria-label="执行过程">
+      <button id="inspector-backdrop" class="drawer-backdrop inspector-backdrop" type="button" aria-label="关闭执行过程" aria-hidden="true" tabindex="-1"></button>
+      <aside class="execution-panel" id="execution-panel" aria-label="执行过程" aria-hidden="false">
         <div class="execution-panel-header">
           <div>
             <p class="eyebrow">执行过程</p>
             <h2>实时观察</h2>
           </div>
-          <button id="toggle-inspector" class="icon-btn inspector-toggle" type="button" title="收起执行面板" aria-label="收起执行面板">›</button>
+          <button id="toggle-inspector" class="icon-btn inspector-toggle" type="button" title="收起执行面板" aria-label="收起执行面板" aria-controls="execution-panel" aria-expanded="true">›</button>
         </div>
 
         <section class="execution-overview" aria-label="当前运行状态">
@@ -196,6 +200,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=6"></script>
+<script src="/app.js?v=7"></script>
 </body>
 </html>

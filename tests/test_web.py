@@ -35,6 +35,9 @@ def test_web_index(tmp_path):
         r = client.get("/")
         assert r.status_code == 200
         assert "ReAgent" in r.text
+        assert 'id="open-inspector"' in r.text
+        assert 'id="toggle-navigation"' in r.text
+        assert 'id="jump-latest"' in r.text
 
 
 def test_web_capabilities(tmp_path):

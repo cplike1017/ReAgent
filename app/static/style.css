@@ -404,6 +404,37 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .status-dot.online { background: #2aa26a; box-shadow: 0 0 0 3px rgb(42 162 106 / 14%); }
 .chat-status { margin-left: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions { flex: 0 0 auto; gap: 10px; }
+.inspector-launch,
+.mobile-nav-toggle {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-muted);
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+.inspector-launch:hover,
+.mobile-nav-toggle:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: var(--accent-soft); }
+.mobile-nav-toggle { display: none; width: 36px; padding: 0; font-size: 17px; }
+.drawer-backdrop {
+  position: fixed;
+  z-index: 14;
+  inset: 0;
+  display: block;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  background: rgb(10 18 33 / 32%);
+  transition: opacity .18s ease, visibility .18s ease;
+  visibility: hidden;
+}
 .mode-switch {
   display: inline-flex;
   gap: 3px;
@@ -953,9 +984,11 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .inspector-note h3 { margin: 0; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .inspector-note p { margin: 5px 0 0; color: var(--text-subtle); font-size: 11px; line-height: 1.55; }
 
-body.inspector-collapsed .workspace { grid-template-columns: minmax(0, 1fr) 0; }
-body.inspector-collapsed .execution-panel { padding-inline: 0; border-left-color: transparent; transform: translateX(100%); }
-body.inspector-collapsed .inspector-toggle { transform: rotate(0deg); }
+@media (min-width: 921px) {
+  body.inspector-collapsed .workspace { grid-template-columns: minmax(0, 1fr) 0; }
+  body.inspector-collapsed .execution-panel { padding-inline: 0; border-left-color: transparent; opacity: 0; pointer-events: none; transform: translateX(100%); }
+  body.inspector-collapsed .inspector-toggle { transform: rotate(0deg); }
+}
 
 @media (max-width: 1180px) {
   .app-shell { grid-template-columns: 232px minmax(0, 1fr); }
@@ -969,28 +1002,49 @@ body.inspector-collapsed .inspector-toggle { transform: rotate(0deg); }
   .workspace { grid-template-columns: minmax(0, 1fr); }
   .execution-panel {
     position: absolute;
-    z-index: 5;
+    z-index: 16;
     top: 86px;
     right: 0;
     bottom: 0;
     width: min(390px, 88vw);
     box-shadow: -10px 0 30px rgb(23 32 51 / 12%);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(100%);
   }
-  body.inspector-collapsed .workspace { grid-template-columns: minmax(0, 1fr); }
-  body.inspector-collapsed .execution-panel { pointer-events: none; }
+  body.inspector-expanded .execution-panel { opacity: 1; pointer-events: auto; transform: translateX(0); }
+  body.inspector-expanded .inspector-backdrop { opacity: 1; pointer-events: auto; visibility: visible; }
   .chat-column { overflow: hidden; }
 }
 @media (max-width: 680px) {
   body { overflow: auto; }
   .app-shell { display: block; height: auto; min-height: 100vh; }
-  .sidebar { display: none; }
+  .sidebar {
+    position: fixed;
+    z-index: 30;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    display: flex;
+    width: min(300px, calc(100vw - 40px));
+    transform: translateX(-105%);
+    box-shadow: 12px 0 32px rgb(23 32 51 / 24%);
+    transition: transform .18s ease;
+  }
+  body.navigation-open { overflow: hidden; }
+  body.navigation-open .sidebar { transform: translateX(0); }
+  body.navigation-open .navigation-backdrop { z-index: 25; opacity: 1; pointer-events: auto; visibility: visible; }
   .main { min-height: 100vh; }
   .chat-header { min-height: 72px; padding: 12px 14px; }
   .task-context h2 { max-width: 190px; font-size: 15px; }
   .connection-status { max-width: 210px; }
   .chat-status { display: none; }
-  .mode-btn { min-width: 49px; padding: 0 6px; }
+  .header-actions { gap: 6px; }
+  .mode-btn { min-width: 45px; padding: 0 5px; }
   .icon-btn { width: 34px; height: 34px; }
+  .mobile-nav-toggle { display: inline-grid; width: 34px; min-height: 34px; }
+  .inspector-launch { width: 34px; min-height: 34px; padding: 0; }
+  .inspector-launch-label { display: none; }
   .workspace { min-height: calc(100vh - 72px); }
   .chat-column { min-height: calc(100vh - 72px); padding: 13px 12px 12px; }
   .run-summary { gap: 8px; margin-bottom: 9px; padding: 8px 10px; }

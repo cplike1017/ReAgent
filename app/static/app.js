@@ -12,6 +12,7 @@ const state = {
   executionSteps: 0,
   executionTools: 0,
   executionHistory: [],
+  followLatest: true,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -37,6 +38,8 @@ function startExecution(data) {
   state.executionStartedAt = Date.now();
   state.executionSteps = 0;
   state.executionTools = 0;
+  state.followLatest = true;
+  clearLivePlan();
   const title = $("#workspace-title");
   if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
   updateExecutionStatus("running", "执行中", "正在准备执行环境");
@@ -134,7 +137,11 @@ function renderLivePlan(plan, revisions) {
   const section = $("#live-plan-section");
   const list = $("#live-plan");
   const meta = $("#live-plan-meta");
-  if (!section || !list || !meta || !Array.isArray(plan) || !plan.length) return;
+  if (!section || !list || !meta) return;
+  if (!Array.isArray(plan) || !plan.length) {
+    clearLivePlan();
+    return;
+  }
   section.hidden = false;
   meta.textContent = String(plan.length) + " 步" + (revisions ? " · 调整 " + String(revisions) : "");
   list.replaceChildren();
@@ -158,6 +165,15 @@ function renderLivePlan(plan, revisions) {
     item.append(icon, copy);
     list.appendChild(item);
   });
+}
+
+function clearLivePlan() {
+  const section = $("#live-plan-section");
+  const list = $("#live-plan");
+  const meta = $("#live-plan-meta");
+  if (list) list.replaceChildren();
+  if (meta) meta.textContent = "0 步";
+  if (section) section.hidden = true;
 }
 
 function renderExecutionHistory(records) {
@@ -579,6 +595,7 @@ async function loadSessions() {
 
 async function openSession(sessionId) {
   state.sessionId = sessionId;
+  setNavigationOpen(false);
   // 高亮
   $$("#session-list .session-item").forEach((el) => el.classList.toggle("active", el.dataset.sessionId === sessionId));
   // 加载消息
@@ -823,6 +840,13 @@ function toolHistoryToCardData(message, declaredCall) {
 
 function newSession() {
   state.sessionId = null;
+  state.executionId = null;
+  state.executionStartedAt = null;
+  state.executionSteps = 0;
+  state.executionTools = 0;
+  state.followLatest = true;
+  clearLivePlan();
+  setNavigationOpen(false);
   $("#messages").innerHTML = `
     <div class="welcome">
       <h2>🤖 ReAgent</h2>
@@ -1109,7 +1133,109 @@ function setStatus(text) {
 
 function scrollToBottom() {
   const msgs = $("#messages");
+  if (!msgs) return;
+  if (!state.followLatest) {
+    updateLatestButton();
+    return;
+  }
   msgs.scrollTop = msgs.scrollHeight;
+  updateLatestButton();
+}
+
+function scrollToLatest() {
+  const msgs = $("#messages");
+  if (!msgs) return;
+  state.followLatest = true;
+  msgs.scrollTop = msgs.scrollHeight;
+  updateLatestButton();
+}
+
+function updateLatestButton() {
+  const button = $("#jump-latest");
+  if (button) button.hidden = state.followLatest;
+}
+
+function isAtLatest(messages) {
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 48;
+}
+
+function isCompactInspectorViewport() {
+  return window.matchMedia("(max-width: 920px)").matches;
+}
+
+function isMobileNavigationViewport() {
+  return window.matchMedia("(max-width: 680px)").matches;
+}
+
+function isInspectorCollapsed() {
+  return isCompactInspectorViewport()
+    ? !document.body.classList.contains("inspector-expanded")
+    : document.body.classList.contains("inspector-collapsed");
+}
+
+function setInspectorCollapsed(collapsed, focusControl = false) {
+  const panel = $("#execution-panel");
+  const closeButton = $("#toggle-inspector");
+  const openButton = $("#open-inspector");
+  const backdrop = $("#inspector-backdrop");
+
+  if (isCompactInspectorViewport()) {
+    document.body.classList.remove("inspector-collapsed");
+    document.body.classList.toggle("inspector-expanded", !collapsed);
+  } else {
+    document.body.classList.remove("inspector-expanded");
+    document.body.classList.toggle("inspector-collapsed", collapsed);
+  }
+
+  if (panel) {
+    panel.setAttribute("aria-hidden", String(collapsed));
+    if ("inert" in panel) panel.inert = collapsed;
+  }
+  if (closeButton) {
+    closeButton.title = collapsed ? "展开执行面板" : "收起执行面板";
+    closeButton.setAttribute("aria-label", closeButton.title);
+    closeButton.setAttribute("aria-expanded", String(!collapsed));
+  }
+  if (openButton) {
+    openButton.title = collapsed ? "查看执行过程" : "隐藏执行过程";
+    openButton.setAttribute("aria-label", openButton.title);
+    openButton.setAttribute("aria-expanded", String(!collapsed));
+  }
+  if (backdrop) {
+    backdrop.setAttribute("aria-hidden", String(collapsed));
+    backdrop.tabIndex = collapsed ? -1 : 0;
+  }
+
+  if (focusControl) {
+    const target = collapsed ? openButton : closeButton;
+    if (target) requestAnimationFrame(() => target.focus());
+  }
+}
+
+function setNavigationOpen(open, focusControl = false) {
+  const toggle = $("#toggle-navigation");
+  const navigation = $("#primary-navigation");
+  const backdrop = $("#navigation-backdrop");
+  const active = isMobileNavigationViewport() && open;
+  document.body.classList.toggle("navigation-open", active);
+  if (toggle) {
+    toggle.title = active ? "关闭会话导航" : "打开会话导航";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(active));
+  }
+  if (navigation) {
+    navigation.setAttribute("aria-hidden", String(!active && isMobileNavigationViewport()));
+    if ("inert" in navigation) navigation.inert = !active && isMobileNavigationViewport();
+  }
+  if (backdrop) {
+    backdrop.setAttribute("aria-hidden", String(!active));
+    backdrop.tabIndex = active ? 0 : -1;
+  }
+  if (focusControl && active && navigation) {
+    requestAnimationFrame(() => navigation.querySelector("button, summary, [href]")?.focus());
+  } else if (focusControl && toggle) {
+    requestAnimationFrame(() => toggle.focus());
+  }
 }
 
 function esc(s) {
@@ -1438,6 +1564,7 @@ async function send() {
   if (!message || state.streaming) return;
 
   addMessage("user", message);
+  scrollToLatest();
   input.value = "";
   startExecution({ mode: state.agentMode, message_preview: message });
   setStreaming(true);
@@ -1654,6 +1781,8 @@ function bindEvents() {
   const stopBtn = $("#stop");
   const uploadBtn = $("#upload-btn");
   const fileInput = $("#file-input");
+  const messages = $("#messages");
+  const jumpLatest = $("#jump-latest");
 
   sendBtn.addEventListener("click", send);
   if (stopBtn) stopBtn.addEventListener("click", stopStreaming);
@@ -1667,6 +1796,13 @@ function bindEvents() {
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
   });
   if (newBtn) newBtn.addEventListener("click", newSession);
+  if (messages) {
+    messages.addEventListener("scroll", () => {
+      state.followLatest = isAtLatest(messages);
+      updateLatestButton();
+    }, { passive: true });
+  }
+  if (jumpLatest) jumpLatest.addEventListener("click", scrollToLatest);
 
   const themeBtn = $("#theme-toggle");
   if (themeBtn) {
@@ -1688,12 +1824,45 @@ function bindEvents() {
   const inspectorBtn = $("#toggle-inspector");
   if (inspectorBtn) {
     inspectorBtn.addEventListener("click", () => {
-      document.body.classList.toggle("inspector-collapsed");
-      const collapsed = document.body.classList.contains("inspector-collapsed");
-      inspectorBtn.title = collapsed ? "展开执行面板" : "收起执行面板";
-      inspectorBtn.setAttribute("aria-label", inspectorBtn.title);
+      setInspectorCollapsed(true, true);
     });
   }
+  const inspectorLauncher = $("#open-inspector");
+  if (inspectorLauncher) {
+    inspectorLauncher.addEventListener("click", () => {
+      setInspectorCollapsed(!isInspectorCollapsed(), true);
+    });
+  }
+  $("#inspector-backdrop")?.addEventListener("click", () => setInspectorCollapsed(true, true));
+
+  const navigationToggle = $("#toggle-navigation");
+  if (navigationToggle) {
+    navigationToggle.addEventListener("click", () => {
+      setNavigationOpen(!document.body.classList.contains("navigation-open"), true);
+    });
+  }
+  $("#navigation-backdrop")?.addEventListener("click", () => setNavigationOpen(false, true));
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (document.body.classList.contains("navigation-open")) {
+      setNavigationOpen(false, true);
+    } else if (!isInspectorCollapsed()) {
+      setInspectorCollapsed(true, true);
+    }
+  });
+
+  const inspectorViewport = window.matchMedia("(max-width: 920px)");
+  const navigationViewport = window.matchMedia("(max-width: 680px)");
+  const syncResponsiveControls = () => {
+    setInspectorCollapsed(isCompactInspectorViewport() ? !document.body.classList.contains("inspector-expanded") : document.body.classList.contains("inspector-collapsed"));
+    setNavigationOpen(document.body.classList.contains("navigation-open"));
+  };
+  if (typeof inspectorViewport.addEventListener === "function") {
+    inspectorViewport.addEventListener("change", syncResponsiveControls);
+    navigationViewport.addEventListener("change", syncResponsiveControls);
+  }
+  setInspectorCollapsed(isCompactInspectorViewport());
+  setNavigationOpen(false);
 
   // 上传文件
   if (uploadBtn && fileInput) {
