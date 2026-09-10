@@ -22,7 +22,7 @@ const fs = require("fs");
 const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
-source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
+source = source.replace(/\r?\ninit\(\);\r?\nloadFiles\(\);\s*$/, "\n");
 source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
 
 const stopButton = { disabled: false, style: {} };

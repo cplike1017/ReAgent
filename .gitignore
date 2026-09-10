@@ -17,6 +17,8 @@ evals/runs/
 *.egg-info/
 build/
 dist/
+.playwright-cli/
+output/playwright/
 
 # IDE
 .idea/
