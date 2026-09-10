@@ -135,3 +135,8 @@
 - Fast-forwarded local `main` from `894140b` to `origin/main` at `0fa1faf` before merging the feature branch.
 - Merged `codex/frontend-execution-ux` without unresolved conflicts. Restored the newer `main` implementation for a semantic JavaScript merge conflict: the older branch changed the `handleFrame` contract but left an incompatible caller. README, dependency, ignore-rule, audit-plan, and planning deliverables were retained.
 - The first merged full-suite run exposed a Windows-only test-harness mismatch: the VM fixture expected LF in the JavaScript bootstrap suffix, but the worktree uses CRLF. Changed the suffix matcher to `\r?\n`, verified the formerly failing test, and reran the complete suite successfully: **282 passed** with one third-party Starlette deprecation warning. `node --check app/static/app.js` also passed.
+
+## Main publication completed (2026-09-11)
+
+- Created merge commit `4409de8` on `main` after the verified merge result.
+- The initial default HTTPS push was reset by the network. Retried with `http.version=HTTP/1.1`; `origin/main` advanced from `0fa1faf` to `4409de8` without force-pushing. A subsequent read-only fetch failed from the same intermittent port 443 condition, but the local tracking ref equals the merged `main` SHA.

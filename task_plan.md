@@ -4,7 +4,7 @@
 Bring the local ReAgent checkout up to date with `origin/main`, apply the supplied environment configuration in the project-prescribed location, and start and verify the service.
 
 ## Current Phase
-README rewrite and main-branch integration (2026-09-11)
+README rewrite and main-branch integration: delivered (2026-09-11)
 
 ## README rewrite and main integration — current request
 
@@ -12,7 +12,7 @@ README rewrite and main-branch integration (2026-09-11)
 - [x] Rewrite README as a complete normal-project entry point while retaining and updating useful architecture/workflow diagrams.
 - [x] Validate Markdown links, commands, and project facts against the repository.
 - [x] Run the relevant regression suite, merge `codex/frontend-execution-ux` into local `main`, and rerun verification on the merge result.
-- [ ] Push `main` to `origin` without force-pushing.
+- [x] Push `main` to `origin` without force-pushing.
 - Scope: documentation and the requested integration only; preserve credentials, runtime data, diagnostic artifacts, and unrelated user changes.
 
 ## Frontend implementation — current request
@@ -63,6 +63,7 @@ README rewrite and main-branch integration (2026-09-11)
 - Source synchronization remains blocked: terminal Git transport could not connect to `github.com:443` in three distinct attempts, so the checkout remains at commit `894140bc0bc90e2967263e42db2a74c26f15f497` (2026-09-07). No pull occurred.
 - Frontend implementation is committed on `codex/frontend-execution-ux` and successfully pushed to `origin` after the Fine-grained PAT was configured. The earlier GitHub HTTPS reset, unavailable SSH key, and API TLS timeout are retained in the progress log as resolved delivery diagnostics.
 - The primary checkout was switched back to `main` while the implementation was being delivered. To preserve that checkout, the implementation now runs from the separate `D:\CodeSource\harness\agent-runtime-execution-ux` worktree on port 8000; its health endpoint and versioned front-end assets were verified there.
+- `codex/frontend-execution-ux` was merged into the updated `main` at `4409de8` and pushed to `origin/main` using HTTP/1.1 after a default-transport connection reset. The merge preserved the newer remote execution-workbench implementation and included the README rewrite, configuration dependency fixes, documentation, and Windows test-harness portability fix.
 
 ## Decisions Made
 | Decision | Rationale |
