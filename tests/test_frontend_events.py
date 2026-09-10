@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -87,6 +87,9 @@ state.streaming = true;
 assert.strictEqual(canChangeSession(), false);
 state.streaming = false;
 assert.strictEqual(canChangeSession(), true);
+state.executionStartedAt = Date.now() - 86410000;
+state.executionFinishedAt = Date.now() - 86400000;
+assert.strictEqual(formatExecutionElapsed(), "10s", "a finished historical run uses its persisted end time");
 '''
 
     result = subprocess.run(

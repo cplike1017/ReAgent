@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v22 */
+/* ReAgent Web UI 前端逻辑 v23 */
 "use strict";
 
 const state = {
@@ -8,6 +8,7 @@ const state = {
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
   executionId: null,
   executionStartedAt: null,
+  executionFinishedAt: null,
   executionTimer: null,
   executionSteps: 0,
   executionTools: 0,
@@ -116,6 +117,7 @@ function startExecution(data) {
   renderExecutionHistory(state.executionHistory);
   if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
+  state.executionFinishedAt = null;
   state.executionSteps = 0;
   state.executionTools = 0;
   state.followLatest = true;
@@ -137,6 +139,7 @@ function startExecution(data) {
 function finishExecution(status, stage) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionTimer = null;
+  if (!state.executionFinishedAt) state.executionFinishedAt = Date.now();
   const labels = {
     success: ["已完成", "执行完成"],
     error: ["执行失败", "执行失败"],
@@ -172,7 +175,8 @@ function renderExecutionMetrics() {
 
 function formatExecutionElapsed() {
   if (!state.executionStartedAt) return "0s";
-  const seconds = Math.max(0, Math.floor((Date.now() - state.executionStartedAt) / 1000));
+  const endedAt = state.executionFinishedAt || Date.now();
+  const seconds = Math.max(0, Math.floor((endedAt - state.executionStartedAt) / 1000));
   if (seconds < 60) return String(seconds) + "s";
   return String(Math.floor(seconds / 60)) + "m " + String(seconds % 60) + "s";
 }
@@ -1244,6 +1248,7 @@ function replayExecution(record, events) {
   state.sessionId = record.session_id || state.sessionId;
   renderExecutionHistory(state.executionHistory);
   state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
+  state.executionFinishedAt = Date.parse(record.finished_at) || null;
   state.executionSteps = 0;
   state.executionTools = 0;
   resetExecutionEventCursor();
@@ -1765,6 +1770,7 @@ function newSession() {
   state.executionId = null;
   resetExecutionEventCursor();
   state.executionStartedAt = null;
+  state.executionFinishedAt = null;
   state.executionSteps = 0;
   state.executionTools = 0;
   state.followLatest = true;
