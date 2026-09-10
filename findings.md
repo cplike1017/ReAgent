@@ -55,6 +55,8 @@
 - `git fetch origin --prune` failed once in this phase with a GitHub port 443 connection error after the feature branch had already been pushed. Treat remote synchronization as pending and revalidate `origin/main` immediately before merge/push; do not assume the local remote-tracking ref is current.
 - The original README is UTF-16 LE. `apply_patch` cannot read that encoding, so the replacement was first created as a validated UTF-8 temporary file and then moved over the explicitly requested `README.md`. This intentional encoding normalization makes the README standard GitHub Markdown; Git reports the migration as a binary diff relative to the old UTF-16 blob.
 - The replacement contains two Mermaid diagrams, seven checked local Markdown links, portable Windows/POSIX setup commands, current API routes, Compose instructions, and no hard-coded test count or placeholder demo claim.
+- Fresh remote inspection shows `origin/main` advanced from `894140b` to `0fa1faf` through a substantial execution-workbench series (30 files, including persisted execution state, retry/cancel lifecycle events, frontend timeline behavior, and dedicated tests). The overlap with this feature branch is concentrated in `app/api/web.py`, `app/static/*`, and `tests/test_web.py`.
+- Integration rule: fast-forward local `main` first, then resolve overlapping implementation conflicts in favor of the newer remote `main`; retain this branch's README rewrite, dependency manifest repair, planning documents, and any non-conflicting additions. This merges branch history without regressing upstream lifecycle work.
 
 ## Requirements
 - Pull upstream updates from `https://github.com/cplike1017/ReAgent` into this local checkout.
