@@ -38,6 +38,8 @@ class LoopHooks:
     before_llm: Callable[[int, list[dict]], Awaitable[None]] | None = None
     # LLM 返回决策之后（保存"LLM 决策后"检查点）
     after_decision: Callable[[LLMResponse, int], Awaitable[None]] | None = None
+    # 工具真正开始执行之前（用于实时状态，而非把已排队误展示成成功）
+    before_tool: Callable[[ToolCallRequest, int], Awaitable[None]] | None = None
     # 每个工具执行完成之后（保存"工具执行后"检查点）
     after_tool: Callable[[ToolCallRequest, ToolResult, int], Awaitable[None]] | None = None
     # 即将返回最终回答之前（保存"Final Answer 前"检查点）
@@ -126,6 +128,8 @@ async def run_react_loop(
 
         for tc in response.tool_calls:
             all_tool_calls.append(tc)
+            if hooks and hooks.before_tool:
+                await hooks.before_tool(tc, steps)
             try:
                 envelope: ToolResult = await execute_tool(tc.name, tc.arguments)
             except asyncio.CancelledError:

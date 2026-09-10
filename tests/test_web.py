@@ -4,6 +4,8 @@ Stage 12 测试：Web UI（进程内直连 + SSE 流式）。
 覆盖：首页静态资源、工具/技能/MCP 列表、同步聊天、SSE 流式事件、会话历史。
 使用 fakeredis + stub LLM + test 环境（跳过 MCP 连接），完全离线。
 """
+import json
+
 import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
@@ -124,6 +126,54 @@ def test_web_chat_stream_sse(tmp_path):
             assert "event: step" in body
             assert "event: tool_result" in body
             assert "event: done" in body
+
+
+def test_web_stream_persists_execution_events(tmp_path):
+    """SSE 每个关键节点带稳定 execution/tool_call ID，且可从 SQLite 回放。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "计算 123 * 456", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            header_execution_id = response.headers["x-execution-id"]
+            body = "".join(response.iter_text())
+
+        frames = [frame for frame in body.split("\n\n") if frame.strip()]
+        parsed = []
+        for frame in frames:
+            event_line = next((line for line in frame.split("\n") if line.startswith("event:")), "")
+            data_line = next((line for line in frame.split("\n") if line.startswith("data:")), "")
+            if event_line and data_line:
+                parsed.append((
+                    event_line.split(":", 1)[1].strip(),
+                    json.loads(data_line.split(":", 1)[1].strip()),
+                ))
+
+        event_names = [name for name, _ in parsed]
+        assert {"execution.started", "llm.started", "step", "tool.started", "tool_result", "done"} <= set(event_names)
+        done = next(data for name, data in parsed if name == "done")
+        assert done["execution_id"] == header_execution_id
+
+        scheduled = next(data for name, data in parsed if name == "step" and data["tool_calls"])
+        tool_started = next(data for name, data in parsed if name == "tool.started")
+        tool_result = next(data for name, data in parsed if name == "tool_result")
+        assert scheduled["tool_calls"][0]["tool_call_id"] == tool_started["tool_call_id"]
+        assert tool_started["tool_call_id"] == tool_result["tool_call_id"]
+
+        snapshot = client.get(f"/api/web/executions/{header_execution_id}")
+        assert snapshot.status_code == 200
+        assert snapshot.json()["status"] == "SUCCEEDED"
+
+        events = client.get(f"/api/web/executions/{header_execution_id}/events").json()
+        assert events["last_seq"] == len(events["events"])
+        assert [event["seq"] for event in events["events"]] == list(range(1, events["last_seq"] + 1))
+
+        session_runs = client.get(
+            f"/api/web/sessions/{done['session_id']}/executions"
+        ).json()
+        assert any(run["execution_id"] == header_execution_id for run in session_runs["executions"])
 
 
 def test_web_sessions(tmp_path):

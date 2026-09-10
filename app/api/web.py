@@ -14,6 +14,7 @@ Web UI 路由（Stage 12）。
 import asyncio
 import json
 from typing import AsyncIterator
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -21,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from app.agent.react_loop import LoopHooks
 from app.errors import AgentError
+from app.execution.models import ExecutionStatus
 from app.tools.schemas import ToolResult
 
 router = APIRouter(prefix="/api/web", tags=["web"])
@@ -41,6 +43,42 @@ def _get_runtime(request: Request):
     return runtime
 
 
+def _get_execution_repository(request: Request):
+    repository = getattr(request.app.state, "execution_repository", None)
+    if repository is None:
+        raise HTTPException(status_code=503, detail="执行记录未初始化")
+    return repository
+
+
+def _preview(value, limit: int = 800) -> tuple[str, bool]:
+    """把事件输出限制为可读预览，保留 falsy 值并避免 SSE 传输无界膨胀。"""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    return text[:limit], len(text) > limit
+
+
+def _event_data(event, *, session_id: str, turn_id: str, payload: dict) -> dict:
+    data = dict(payload)
+    data.update(
+        {
+            "execution_id": event.execution_id,
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "seq": event.seq,
+            "event_id": event.event_id,
+            "timestamp": event.timestamp,
+        }
+    )
+    return data
+
+
+def _sse(event_type: str, payload: dict, seq: int | None = None) -> str:
+    event_id = f"id: {seq}\n" if seq is not None else ""
+    return f"{event_id}event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 # ---------------------------------------------------------------------------
 # 同步聊天
 # ---------------------------------------------------------------------------
@@ -48,33 +86,93 @@ def _get_runtime(request: Request):
 async def web_chat(req: WebChatRequest, request: Request) -> dict:
     app = request.app.state
     runtime = _get_runtime(request)
+    repository = _get_execution_repository(request)
     settings = app.settings
-
-    # 会话级 agent_mode 覆盖
     agent_mode = req.agent_mode or settings.agent_mode
-    old_mode = settings.agent_mode
-    settings.agent_mode = agent_mode
+    session_id = req.session_id or f"session_{uuid4().hex[:12]}"
+    turn_id = f"turn_{uuid4().hex[:12]}"
+    execution_id = f"exec_{uuid4().hex[:12]}"
+
+    repository.create(
+        execution_id=execution_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        agent_mode=agent_mode,
+        input_preview=_preview(req.message, 240)[0],
+    )
+    repository.append_event(
+        execution_id,
+        "execution.started",
+        {"mode": agent_mode, "message_preview": _preview(req.message, 240)[0]},
+    )
+
     try:
-        result = await runtime.run(req.message, session_id=req.session_id)
+        async with app.web_runtime_lock:
+            old_mode = settings.agent_mode
+            settings.agent_mode = agent_mode
+            try:
+                result = await runtime.run(
+                    req.message, session_id=session_id, turn_id=turn_id
+                )
+            finally:
+                settings.agent_mode = old_mode
     except AgentError as exc:
-        # 结构化错误（LLM 不可用 / 超步数等）：HTTP 502，前端可读 message
+        repository.finish(
+            execution_id,
+            status=ExecutionStatus.FAILED,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        repository.append_event(
+            execution_id,
+            "execution.failed",
+            {"type": type(exc).__name__, "message": str(exc)},
+        )
         raise HTTPException(status_code=502, detail={"type": type(exc).__name__, "message": str(exc)})
     except Exception as exc:
+        repository.finish(
+            execution_id,
+            status=ExecutionStatus.FAILED,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        repository.append_event(
+            execution_id,
+            "execution.failed",
+            {"type": type(exc).__name__, "message": str(exc)},
+        )
         raise HTTPException(status_code=500, detail={"type": type(exc).__name__, "message": str(exc)})
-    finally:
-        settings.agent_mode = old_mode
+
+    repository.finish(
+        execution_id,
+        status=ExecutionStatus.SUCCEEDED,
+        trace_id=result.trace_id,
+        answer_preview=_preview(result.answer, 400)[0],
+    )
+    repository.append_event(
+        execution_id,
+        "execution.completed",
+        {
+            "steps": result.steps,
+            "tool_calls": len(result.tool_calls),
+            "trace_id": result.trace_id,
+        },
+    )
 
     return {
+        "execution_id": execution_id,
         "session_id": result.session_id,
         "answer": result.answer,
         "steps": result.steps,
-        "plan": [s.model_dump() for s in result.plan],
+        "plan": [step.model_dump() for step in result.plan],
         "plan_revisions": result.plan_revisions,
-        "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls],
+        "tool_calls": [
+            {"tool_call_id": call.id, "name": call.name, "arguments": call.arguments}
+            for call in result.tool_calls
+        ],
         "trace_id": result.trace_id,
         "checkpoint_id": result.checkpoint_id,
         "mode": agent_mode,
-        # Trace 树（Agent 工作流可视化；tracing 关闭时为 None）
         "trace": _build_trace_tree(request, result.trace_id),
     }
 
@@ -95,7 +193,7 @@ def _build_trace_tree(request: Request, trace_id: str | None) -> dict | None:
 
 def _tool_calls_with_duration(result, trace_tree: dict | None) -> list[dict]:
     """把工具调用列表与 Trace 中的耗时关联（按顺序配对 tool.execute span）。"""
-    calls = [{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls]
+    calls = [{"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls]
     if not trace_tree or not calls:
         return calls
     # 收集 trace 树中所有 tool.execute span 的耗时（按出现顺序）
@@ -124,74 +222,181 @@ def _tool_calls_with_duration(result, trace_tree: dict | None) -> list[dict]:
 @router.post("/chat/stream")
 async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingResponse:
     runtime = _get_runtime(request)
-    settings = request.app.state.settings
+    app = request.app.state
+    settings = app.settings
+    repository = _get_execution_repository(request)
     agent_mode = req.agent_mode or settings.agent_mode
+    session_id = req.session_id or f"session_{uuid4().hex[:12]}"
+    turn_id = f"turn_{uuid4().hex[:12]}"
+    execution_id = f"exec_{uuid4().hex[:12]}"
+
+    repository.create(
+        execution_id=execution_id,
+        session_id=session_id,
+        turn_id=turn_id,
+        agent_mode=agent_mode,
+        input_preview=_preview(req.message, 240)[0],
+    )
 
     async def event_gen() -> AsyncIterator[str]:
         queue: asyncio.Queue = asyncio.Queue()
-        session_id = req.session_id
 
-        async def _emit(event: str, data: dict) -> None:
-            await queue.put(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n")
+        async def _emit(event_type: str, payload: dict) -> None:
+            recorded = repository.append_event(execution_id, event_type, payload)
+            data = _event_data(
+                recorded,
+                session_id=session_id,
+                turn_id=turn_id,
+                payload=payload,
+            )
+            await queue.put(_sse(event_type, data, recorded.seq))
 
-        # 流式事件钩子：每个关键节点推送
+        async def _hook_before_llm(step: int, messages: list[dict]) -> None:
+            await _emit(
+                "llm.started",
+                {"step": step, "message_count": len(messages)},
+            )
+
         async def _hook_after_decision(response, step: int) -> None:
-            await _emit("step", {
-                "step": step,
-                "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls],
-                "content_preview": (response.content or "")[:200],
-                "is_final": response.is_final_answer,
-            })
+            await _emit(
+                "step",
+                {
+                    "step": step,
+                    "tool_calls": [
+                        {
+                            "id": tool_call.id,
+                            "tool_call_id": tool_call.id,
+                            "name": tool_call.name,
+                            "arguments": tool_call.arguments,
+                        }
+                        for tool_call in response.tool_calls
+                    ],
+                    "content_preview": _preview(response.content or "", 200)[0],
+                    "is_final": response.is_final_answer,
+                },
+            )
+
+        async def _hook_before_tool(tc, step: int) -> None:
+            await _emit(
+                "tool.started",
+                {
+                    "step": step,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "arguments": tc.arguments,
+                },
+            )
 
         async def _hook_after_tool(tc, envelope: ToolResult, step: int) -> None:
-            await _emit("tool_result", {
-                "step": step,
-                "tool": tc.name,
-                "arguments": tc.arguments,
-                "success": envelope.success,
-                "data": str(envelope.data)[:300] if envelope.data else None,
-                "error": envelope.error.model_dump() if envelope.error else None,
-                "duration_ms": (envelope.metadata or {}).get("duration_ms"),
-            })
+            output, truncated = _preview(envelope.data, 1000)
+            await _emit(
+                "tool_result",
+                {
+                    "step": step,
+                    "tool": tc.name,
+                    "tool_call_id": tc.id,
+                    "arguments": tc.arguments,
+                    "success": envelope.success,
+                    "data": output,
+                    "output_truncated": truncated,
+                    "output_type": type(envelope.data).__name__,
+                    "error": envelope.error.model_dump() if envelope.error else None,
+                    "duration_ms": (envelope.metadata or {}).get("duration_ms"),
+                    "retries": (envelope.metadata or {}).get("retries", 0),
+                },
+            )
 
         async def _hook_before_final(response, step: int) -> None:
-            await _emit("final", {"step": step, "content": response.content or ""})
+            await _emit(
+                "final",
+                {"step": step, "content": response.content or ""},
+            )
 
         hooks = LoopHooks(
+            before_llm=_hook_before_llm,
             after_decision=_hook_after_decision,
+            before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
             before_final=_hook_before_final,
         )
 
-        # 生成器：先跑 Agent，同时消费队列推送
         async def _run() -> None:
-            old_mode = settings.agent_mode
-            settings.agent_mode = agent_mode
             try:
-                result = await runtime.run(req.message, session_id=session_id, extra_hooks=hooks)
-                # 附带 Trace 树（Agent 工作流可视化）
-                trace_tree = None
-                if result.trace_id:
+                await _emit(
+                    "execution.started",
+                    {
+                        "mode": agent_mode,
+                        "message_preview": _preview(req.message, 240)[0],
+                    },
+                )
+                async with app.web_runtime_lock:
+                    old_mode = settings.agent_mode
+                    settings.agent_mode = agent_mode
                     try:
-                        trace_tree = request.app.state.recorder.build_tree(result.trace_id)
-                    except Exception:
-                        trace_tree = None
-                await _emit("done", {
-                    "session_id": result.session_id,
-                    "answer": result.answer,
-                    "tool_calls": _tool_calls_with_duration(result, trace_tree),
-                    "plan": [s.model_dump() for s in result.plan],
-                    "plan_revisions": result.plan_revisions,
-                    "trace_id": result.trace_id,
-                    "trace": trace_tree,
-                })
+                        result = await runtime.run(
+                            req.message,
+                            session_id=session_id,
+                            turn_id=turn_id,
+                            extra_hooks=hooks,
+                        )
+                    finally:
+                        settings.agent_mode = old_mode
+
+                trace_tree = _build_trace_tree(request, result.trace_id)
+                repository.finish(
+                    execution_id,
+                    status=ExecutionStatus.SUCCEEDED,
+                    trace_id=result.trace_id,
+                    answer_preview=_preview(result.answer, 400)[0],
+                )
+                await _emit(
+                    "done",
+                    {
+                        "session_id": result.session_id,
+                        "answer": result.answer,
+                        "tool_calls": _tool_calls_with_duration(result, trace_tree),
+                        "plan": [step.model_dump() for step in result.plan],
+                        "plan_revisions": result.plan_revisions,
+                        "trace_id": result.trace_id,
+                        "trace": trace_tree,
+                    },
+                )
+                await _emit(
+                    "execution.completed",
+                    {
+                        "steps": result.steps,
+                        "tool_calls": len(result.tool_calls),
+                        "trace_id": result.trace_id,
+                    },
+                )
+            except asyncio.CancelledError:
+                repository.finish(
+                    execution_id,
+                    status=ExecutionStatus.CANCELLED,
+                    error_type="CancelledError",
+                    error_message="客户端取消了流式执行。",
+                )
+                raise
             except AgentError as exc:
+                repository.finish(
+                    execution_id,
+                    status=ExecutionStatus.FAILED,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
                 await _emit("error", {"type": type(exc).__name__, "message": str(exc)})
+                await _emit("execution.failed", {"type": type(exc).__name__, "message": str(exc)})
             except Exception as exc:
+                repository.finish(
+                    execution_id,
+                    status=ExecutionStatus.FAILED,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                )
                 await _emit("error", {"type": type(exc).__name__, "message": str(exc)})
+                await _emit("execution.failed", {"type": type(exc).__name__, "message": str(exc)})
             finally:
-                settings.agent_mode = old_mode
-                await queue.put(None)  # 结束信号
+                await queue.put(None)
 
         task = asyncio.create_task(_run())
         try:
@@ -205,12 +410,53 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={"X-Execution-ID": execution_id, "Cache-Control": "no-cache"},
+    )
 
 
-# ---------------------------------------------------------------------------
-# 能力列表
-# ---------------------------------------------------------------------------
+@router.get("/executions/{execution_id}")
+async def web_execution(execution_id: str, request: Request) -> dict:
+    record = _get_execution_repository(request).get(execution_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+    return record.model_dump(mode="json")
+
+
+@router.get("/executions/{execution_id}/events")
+async def web_execution_events(
+    execution_id: str,
+    request: Request,
+    after_seq: int = 0,
+    limit: int = 500,
+) -> dict:
+    repository = _get_execution_repository(request)
+    record = repository.get(execution_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+    events = repository.list_events(execution_id, after_seq=after_seq, limit=limit)
+    return {
+        "execution_id": execution_id,
+        "last_seq": record.last_seq,
+        "events": [event.model_dump(mode="json") for event in events],
+    }
+
+
+@router.get("/sessions/{session_id}/executions")
+async def web_session_executions(
+    session_id: str,
+    request: Request,
+    limit: int = 50,
+) -> dict:
+    records = _get_execution_repository(request).list_for_session(session_id, limit=limit)
+    return {
+        "session_id": session_id,
+        "executions": [record.model_dump(mode="json") for record in records],
+    }
+
+
 @router.get("/tools")
 async def web_tools(request: Request) -> dict:
     runtime = _get_runtime(request)

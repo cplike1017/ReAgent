@@ -211,6 +211,11 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_decision:
             await self._extra_hooks.after_decision(response, step)
 
+    async def _hook_before_tool(self, tc, step: int) -> None:
+        """工具开始前：把真实的开始时机暴露给外部观察钩子。"""
+        if self._extra_hooks and self._extra_hooks.before_tool:
+            await self._extra_hooks.before_tool(tc, step)
+
     async def _hook_after_tool(self, tc, envelope: ToolResult, step: int) -> None:
         """工具执行后：状态回到 RUNNING，保存检查点。"""
         state = self._state
@@ -234,6 +239,7 @@ class AgentRuntime:
         return LoopHooks(
             before_llm=self._hook_before_llm,
             after_decision=self._hook_after_decision,
+            before_tool=self._hook_before_tool,
             after_tool=self._hook_after_tool,
             before_final=self._hook_before_final,
         )

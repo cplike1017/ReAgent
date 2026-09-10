@@ -23,6 +23,7 @@ from app.agent.runtime import AgentRuntime
 from app.api.routes import router
 from app.api.web import router as web_router
 from app.checkpoint.repository import SQLiteCheckpointRepository
+from app.execution.repository import SQLiteExecutionRepository
 from app.config import Settings, get_settings
 from app.llm.client import create_llm_client
 from app.mcp.client import MCPClientManager
@@ -110,7 +111,15 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         # 3) Web 进程内运行时（记忆 + MCP + 技能）
         app.state.runtime = build_web_runtime(settings, recorder)
 
-        # 4) 后台预初始化 MCP（不阻塞 Web 启动；工具在后台陆续注册）
+        # 4) 执行事件存储：页面刷新后仍可回放已发生的 Agent 生命周期。
+        execution_repository = SQLiteExecutionRepository(settings.database_url)
+        execution_repository.mark_running_interrupted()
+        app.state.execution_repository = execution_repository
+        # 现有 AgentRuntime 保存了回合级可变状态，直连 Web 模式先串行化执行，
+        # 防止不同会话的模式、钩子和工具结果相互串扰。
+        app.state.web_runtime_lock = asyncio.Lock()
+
+        # 5) 后台预初始化 MCP（不阻塞 Web 启动；工具在后台陆续注册）
         mcp_task = None
         if app.state.runtime.mcp_client is not None:
             async def _prewarm_mcp():
@@ -137,6 +146,7 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
             await _quiet_mcp_close(app.state.runtime.mcp_client)
         if app.state.runtime.memory is not None:
             app.state.runtime.memory.close()
+        execution_repository.close()
         await client.aclose()
 
     app = FastAPI(title=settings.app_name, version=settings.agent_version, lifespan=lifespan)

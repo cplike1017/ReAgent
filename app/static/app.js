@@ -6,6 +6,11 @@ const state = {
   agentMode: "react",
   streaming: false,
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
+  executionId: null,
+  executionStartedAt: null,
+  executionTimer: null,
+  executionSteps: 0,
+  executionTools: 0,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -21,6 +26,151 @@ async function init() {
 function setConnStatus(online) {
   $("#conn-status").className = "status-dot" + (online ? " online" : "");
   $("#conn-text").textContent = online ? "已连接" : "连接失败";
+}
+
+function startExecution(data) {
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionId = data.execution_id || state.executionId;
+  state.executionStartedAt = Date.now();
+  state.executionSteps = 0;
+  state.executionTools = 0;
+  const title = $("#workspace-title");
+  if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
+  updateExecutionStatus("running", "执行中", "正在准备执行环境");
+  const list = $("#execution-timeline");
+  if (list) list.replaceChildren();
+  $("#timeline-count").textContent = "0";
+  appendExecutionEvent("running", "任务已受理", data.mode ? "模式：" + formatMode(data.mode) : "");
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionTimer = window.setInterval(renderExecutionMetrics, 500);
+  renderExecutionMetrics();
+}
+
+function finishExecution(status, stage) {
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  const labels = {
+    success: ["已完成", "执行完成"],
+    error: ["执行失败", "执行失败"],
+    cancelled: ["已停止", "已停止"],
+  };
+  const label = labels[status] || labels.success;
+  updateExecutionStatus(status, label[0], stage || label[1]);
+  renderExecutionMetrics();
+}
+
+function updateExecutionStatus(status, badgeText, stage) {
+  const badge = $("#run-state-badge");
+  if (badge) {
+    badge.className = "run-state-badge " + status;
+    badge.textContent = badgeText;
+  }
+  const runStage = $("#run-stage");
+  if (runStage && stage) runStage.textContent = stage;
+  const inspectorState = $("#inspector-state");
+  if (inspectorState) inspectorState.textContent = badgeText;
+  const mode = $("#inspector-mode");
+  if (mode) mode.textContent = formatMode(state.agentMode);
+}
+
+function renderExecutionMetrics() {
+  const stepCount = $("#run-step-count");
+  const toolCount = $("#run-tool-count");
+  const elapsed = $("#run-elapsed");
+  if (stepCount) stepCount.textContent = String(state.executionSteps);
+  if (toolCount) toolCount.textContent = String(state.executionTools);
+  if (elapsed) elapsed.textContent = formatExecutionElapsed();
+}
+
+function formatExecutionElapsed() {
+  if (!state.executionStartedAt) return "0s";
+  const seconds = Math.max(0, Math.floor((Date.now() - state.executionStartedAt) / 1000));
+  if (seconds < 60) return String(seconds) + "s";
+  return String(Math.floor(seconds / 60)) + "m " + String(seconds % 60) + "s";
+}
+
+function formatMode(mode) {
+  return mode === "plan" ? "Plan" : "ReAct";
+}
+
+function truncateForWorkspace(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > 46 ? text.slice(0, 45) + "…" : text;
+}
+
+function appendExecutionEvent(kind, title, detail) {
+  const list = $("#execution-timeline");
+  if (!list) return;
+  const empty = list.querySelector(".timeline-empty");
+  if (empty) empty.remove();
+
+  const item = document.createElement("li");
+  item.className = "timeline-item " + kind;
+  const heading = document.createElement("div");
+  heading.className = "timeline-title";
+  heading.textContent = title;
+  item.appendChild(heading);
+  if (detail) {
+    const copy = document.createElement("div");
+    copy.className = "timeline-detail";
+    copy.textContent = detail;
+    item.appendChild(copy);
+  }
+  const time = document.createElement("time");
+  time.className = "timeline-time";
+  time.textContent = new Date().toLocaleTimeString("zh-CN", {
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  item.appendChild(time);
+  list.appendChild(item);
+  list.scrollTop = list.scrollHeight;
+  $("#timeline-count").textContent = String(list.querySelectorAll(".timeline-item").length);
+}
+
+function markToolRunning(data) {
+  const cards = $$("#messages .ts-card[data-tool-call-id]");
+  for (let i = cards.length - 1; i >= 0; i--) {
+    const card = cards[i];
+    if (data.tool_call_id && card.dataset.toolCallId === data.tool_call_id) {
+      const status = card.querySelector(".ts-status");
+      if (status) {
+        status.textContent = "执行中";
+        status.className = "ts-status running";
+      }
+      card.dataset.toolStatus = "running";
+      break;
+    }
+  }
+}
+
+function renderLivePlan(plan, revisions) {
+  const section = $("#live-plan-section");
+  const list = $("#live-plan");
+  const meta = $("#live-plan-meta");
+  if (!section || !list || !meta || !Array.isArray(plan) || !plan.length) return;
+  section.hidden = false;
+  meta.textContent = String(plan.length) + " 步" + (revisions ? " · 调整 " + String(revisions) : "");
+  list.replaceChildren();
+  plan.forEach((step, index) => {
+    const stateName = String(step.status || "PLANNED").toLowerCase();
+    const item = document.createElement("div");
+    item.className = "live-plan-item " + stateName;
+    const icon = document.createElement("span");
+    icon.className = "live-plan-icon";
+    icon.textContent = stateName === "succeeded" ? "●" : stateName === "failed" ? "×" : String(index + 1);
+    const copy = document.createElement("div");
+    copy.className = "live-plan-copy";
+    const title = document.createElement("strong");
+    title.textContent = step.description || "未命名步骤";
+    copy.appendChild(title);
+    if (step.result) {
+      const result = document.createElement("span");
+      result.textContent = step.result;
+      copy.appendChild(result);
+    }
+    item.append(icon, copy);
+    list.appendChild(item);
+  });
 }
 
 /* ================= 能力列表 ================= */
@@ -837,6 +987,7 @@ async function send() {
 
   addMessage("user", message);
   input.value = "";
+  startExecution({ mode: state.agentMode, message_preview: message });
   setStreaming(true);
 
   const assistantEl = addMessage("assistant", "");
@@ -856,6 +1007,8 @@ async function send() {
       body: JSON.stringify({ message, session_id: state.sessionId, agent_mode: state.agentMode }),
       signal: state.abortCtrl.signal,
     });
+    const executionId = resp.headers.get("X-Execution-ID");
+    if (executionId) state.executionId = executionId;
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -882,6 +1035,8 @@ async function send() {
     assistantEl.classList.remove("streaming");
     if (finalData) {
       state.sessionId = finalData.session_id;
+      renderLivePlan(finalData.plan, finalData.plan_revisions);
+      finishExecution("success", "已完成，可查看完整工作流");
       addWorkflowPanel({
         trace: finalData.trace, trace_id: finalData.trace_id,
         plan: finalData.plan, plan_revisions: finalData.plan_revisions,
@@ -891,9 +1046,13 @@ async function send() {
   } catch (e) {
     if (e.name === "AbortError") {
       contentEl.textContent = "⏹ 已停止生成。";
+      finishExecution("cancelled", "已停止接收执行结果");
+      appendExecutionEvent("warning", "已请求停止", "服务端会清理当前执行任务");
     } else {
       assistantEl.classList.remove("streaming");
       contentEl.textContent = "⚠️ 请求失败: " + e.message;
+      finishExecution("error", "请求失败");
+      appendExecutionEvent("error", "请求失败", e.message);
     }
   }
   $("#stop").style.display = "none";
@@ -930,28 +1089,63 @@ function handleFrame(frame, contentEl, onComplete) {
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
   switch (event) {
+    case "execution.started":
+      startExecution(data);
+      break;
+    case "llm.started":
+      updateExecutionStatus("running", "执行中", "正在请求模型第 " + String(data.step || "?") + " 轮决策");
+      appendExecutionEvent("running", "模型开始决策", "第 " + String(data.step || "?") + " 轮");
+      break;
     case "step":
+      state.executionSteps = Math.max(state.executionSteps, Number(data.step) || 0);
+      renderExecutionMetrics();
+      updateExecutionStatus("running", "执行中", "第 " + String(data.step || "?") + " 轮决策完成");
+      appendExecutionEvent("running", "模型完成决策", data.is_final ? "正在生成最终回答" : "已确定下一步");
       if (data.tool_calls && data.tool_calls.length) {
         data.tool_calls.forEach((tc) => {
           addToolMsg({ tool: tc.name, arguments: tc.arguments, tool_call_id: tc.id, data: "等待执行..." });
         });
       }
       break;
+    case "tool.started":
+      markToolRunning(data);
+      updateExecutionStatus("running", "执行中", "正在调用工具：" + String(data.tool || ""));
+      appendExecutionEvent("running", "开始调用工具：" + String(data.tool || ""), "");
+      break;
     case "tool_result":
-      // 回填对应的卡片（按工具名匹配最近的未完成卡片）
+      // 回填对应的卡片：优先按稳定 tool_call_id，而不是按工具名猜测。
       if (!updateToolCard(data.tool, data)) {
         addToolMsg(data); // 找不到则新增
       }
+      state.executionTools += 1;
+      renderExecutionMetrics();
+      appendExecutionEvent(
+        data.success === false ? "error" : "success",
+        data.success === false ? "工具执行失败：" + String(data.tool || "") : "工具执行完成：" + String(data.tool || ""),
+        data.duration_ms != null ? "耗时 " + formatMs(data.duration_ms) : ""
+      );
       break;
     case "final":
       contentEl.innerHTML = (window.marked && typeof window.marked.parse === "function")
         ? window.marked.parse(data.content || "") : esc(data.content || "");
+      updateExecutionStatus("running", "执行中", "正在整理最终回答");
+      appendExecutionEvent("running", "已生成最终回答", "等待执行记录归档");
       break;
     case "done":
+      renderLivePlan(data.plan, data.plan_revisions);
       onComplete(data.answer || "", data);
+      break;
+    case "execution.completed":
+      finishExecution("success", "执行记录已保存");
+      appendExecutionEvent("success", "执行记录已保存", data.trace_id ? "Trace " + String(data.trace_id).slice(-12) : "");
       break;
     case "error":
       addErrorMsg(data.message);
+      finishExecution("error", "Agent 返回错误");
+      appendExecutionEvent("error", "Agent 执行失败", data.message || "");
+      break;
+    case "execution.failed":
+      finishExecution("error", "执行失败");
       break;
   }
 }
