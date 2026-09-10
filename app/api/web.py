@@ -299,6 +299,9 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "tool_call_id": tc.id,
                     "arguments": tc.arguments,
                     "success": envelope.success,
+                    # None 可能是成功工具的真实返回值；失败信封的默认 None 则不应
+                    # 被前端误展示为“null 输出”。用独立字段保留这个事实边界。
+                    "has_output": envelope.success or envelope.data is not None,
                     "data": output,
                     "output_truncated": truncated,
                     "output_type": type(envelope.data).__name__,

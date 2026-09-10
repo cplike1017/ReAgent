@@ -162,6 +162,8 @@ def test_web_stream_persists_execution_events(tmp_path):
         tool_result = next(data for name, data in parsed if name == "tool_result")
         assert scheduled["tool_calls"][0]["tool_call_id"] == tool_started["tool_call_id"]
         assert tool_started["tool_call_id"] == tool_result["tool_call_id"]
+        assert tool_result["has_output"] is True
+        assert tool_result["data"] not in (None, "")
 
         snapshot = client.get(f"/api/web/executions/{header_execution_id}")
         assert snapshot.status_code == 200

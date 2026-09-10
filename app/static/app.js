@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v4 */
+/* ReAgent Web UI 前端逻辑 v6 */
 "use strict";
 
 const state = {
@@ -19,8 +19,9 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 /* ================= 初始化 ================= */
 async function init() {
-  await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
-  setConnStatus(true);
+  const [capabilitiesReady] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
+  // 连接状态必须来自真实 API 响应，不能在失败后被无条件覆盖为“已连接”。
+  setConnStatus(capabilitiesReady === true);
   bindEvents();
 }
 
@@ -127,22 +128,6 @@ function appendExecutionEvent(kind, title, detail, timestamp) {
   list.appendChild(item);
   list.scrollTop = list.scrollHeight;
   $("#timeline-count").textContent = String(list.querySelectorAll(".timeline-item").length);
-}
-
-function markToolRunning(data) {
-  const cards = $$("#messages .ts-card[data-tool-call-id]");
-  for (let i = cards.length - 1; i >= 0; i--) {
-    const card = cards[i];
-    if (data.tool_call_id && card.dataset.toolCallId === data.tool_call_id) {
-      const status = card.querySelector(".ts-status");
-      if (status) {
-        status.textContent = "执行中";
-        status.className = "ts-status running";
-      }
-      card.dataset.toolStatus = "running";
-      break;
-    }
-  }
 }
 
 function renderLivePlan(plan, revisions) {
@@ -447,26 +432,31 @@ function replayExecutionEvent(event) {
 /* ================= 能力列表 ================= */
 async function loadCapabilities() {
   try {
-    const [tools, skills, mcp] = await Promise.all([
-      fetch("/api/web/tools").then((r) => r.json()),
-      fetch("/api/web/skills").then((r) => r.json()),
-      fetch("/api/web/mcp").then((r) => r.json()),
+    const responses = await Promise.all([
+      fetch("/api/web/tools"),
+      fetch("/api/web/skills"),
+      fetch("/api/web/mcp"),
     ]);
-    renderList("#tool-list", tools.tools.map((t) => ({
+    if (responses.some((response) => !response.ok)) {
+      throw new Error("能力接口返回失败");
+    }
+    const [tools, skills, mcp] = await Promise.all(responses.map((response) => response.json()));
+    renderList("#tool-list", (tools.tools || []).map((t) => ({
       text: t.name + (t.risk_level !== "low" ? ` [${t.risk_level}]` : ""),
       title: t.description,
     })));
     $("#tool-count").textContent = tools.count;
-    renderList("#skill-list", skills.skills.map((s) => ({
+    renderList("#skill-list", (skills.skills || []).map((s) => ({
       text: s.name, title: s.description,
     })));
     $("#skill-count").textContent = skills.count;
-    renderList("#mcp-list", mcp.servers.map((s) => ({
+    renderList("#mcp-list", (mcp.servers || []).map((s) => ({
       text: `${s.name} (${s.tool_count})`, title: `transport: ${s.transport}`,
     })));
     $("#mcp-count").textContent = mcp.count;
+    return true;
   } catch (e) {
-    setConnStatus(false);
+    return false;
   }
 }
 
@@ -706,7 +696,7 @@ function renderOrchestrationBody(data) {
           <div class="sa-body">
             ${ar.error ? `<div class="ts-section"><div class="ts-label err-label">⚠️ 错误</div><pre class="ts-code err-code">${esc(ar.error)}</pre></div>` : ""}
             <div class="ts-section"><div class="ts-label">📤 回答</div>
-              <div class="md-body">${window.marked && typeof window.marked.parse === "function" ? window.marked.parse(ar.answer || "(无输出)") : esc(ar.answer || "(无输出)")}</div>
+              <div class="md-body">${renderMarkdown(ar.answer || "(无输出)")}</div>
             </div>
           </div>
         </div>`;
@@ -727,7 +717,7 @@ function renderOrchestrationBody(data) {
   // 最终答案
   if (data.final_answer) {
     html += `<div class="orch-section"><div class="tl-title">最终合成答案</div>`;
-    html += `<div class="md-body">${window.marked && typeof window.marked.parse === "function" ? window.marked.parse(data.final_answer) : esc(data.final_answer)}</div></div>`;
+    html += `<div class="md-body">${renderMarkdown(data.final_answer)}</div></div>`;
   }
 
   // Trace 树
@@ -759,32 +749,76 @@ function bindOrchestrationToggles(panel) {
 }
 
 function renderHistory(messages) {
-  $("#messages").innerHTML = "";
-  messages.forEach((m) => {
-    if (m.role === "user") {
-      addMessage("user", typeof m.content === "string" ? m.content : JSON.stringify(m.content));
-    } else if (m.role === "assistant") {
-      // 带 tool_calls 的 assistant 消息 content 为 null，跳过（由后续 tool 消息体现）
-      if (m.content === null || m.content === undefined || m.content === "") {
-        if (m.tool_calls && m.tool_calls.length) return; // 跳过决策消息
-        return;
+  const callsById = new Map();
+  $("#messages").replaceChildren();
+  messages.forEach((message) => {
+    if (!message || !message.role) return;
+    if (message.role === "user") {
+      addMessage("user", typeof message.content === "string" ? message.content : formatJsonValue(message.content));
+      return;
+    }
+    if (message.role === "assistant") {
+      if (Array.isArray(message.tool_calls)) {
+        message.tool_calls.forEach((call) => {
+          const id = call && call.id;
+          if (!id) return;
+          callsById.set(id, {
+            id,
+            tool: (call.function && call.function.name) || call.name || "tool",
+            arguments: parseToolArguments(
+              (call.function && call.function.arguments) ?? call.arguments
+            ),
+          });
+        });
       }
-      const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-      addMessage("assistant", content);
-    } else if (m.role === "tool") {
-      addToolMsg({ tool: m.name || "tool", arguments: {}, success: true, data: contentPreview(m.content) });
+      // 含 tool_calls 的决策消息没有用户可读正文；工具卡片会按稳定 ID 呈现。
+      if (message.content === null || message.content === undefined || message.content === "") return;
+      addMessage("assistant", typeof message.content === "string" ? message.content : formatJsonValue(message.content));
+      return;
+    }
+    if (message.role === "tool") {
+      addToolMsg(toolHistoryToCardData(message, callsById.get(message.tool_call_id)));
     }
   });
   scrollToBottom();
 }
 
-function contentPreview(s) {
+function parseToolArguments(raw) {
+  if (raw === null || raw === undefined || raw === "") return {};
+  if (typeof raw !== "string") return raw;
+  try { return JSON.parse(raw); } catch (error) { return raw; }
+}
+
+function parsePersistedToolResult(raw) {
   try {
-    const obj = JSON.parse(s);
-    return (obj.data || obj.content || s).toString().slice(0, 200);
-  } catch (e) {
-    return String(s).slice(0, 200);
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    return null;
   }
+}
+
+function toolHistoryToCardData(message, declaredCall) {
+  const envelope = parsePersistedToolResult(message.content);
+  const hasEnvelope = envelope && typeof envelope.success === "boolean";
+  const metadata = hasEnvelope && envelope.metadata && typeof envelope.metadata === "object"
+    ? envelope.metadata : {};
+  const hasOutput = hasEnvelope
+    ? envelope.success || (envelope.data !== null && envelope.data !== undefined)
+    : Boolean(envelope && hasOwn(envelope, "data"));
+  return {
+    tool: message.name || (declaredCall && declaredCall.tool) || (envelope && envelope.tool_name) || "tool",
+    tool_call_id: message.tool_call_id || (declaredCall && declaredCall.id) || "",
+    arguments: (declaredCall && declaredCall.arguments) || metadata.args || {},
+    success: hasEnvelope ? envelope.success : undefined,
+    status: hasEnvelope ? undefined : "unknown",
+    has_output: hasOutput,
+    data: envelope && hasOwn(envelope, "data") ? envelope.data : undefined,
+    error: envelope && envelope.error ? envelope.error : null,
+    duration_ms: metadata.duration_ms,
+    retries: metadata.retries,
+    historical: true,
+  };
 }
 
 function newSession() {
@@ -814,10 +848,9 @@ function addMessage(role, content, meta) {
     div.appendChild(metaEl);
   }
   const contentEl = document.createElement("div");
-  if (role === "assistant" && window.marked && typeof window.marked.parse === "function") {
-    // Markdown 渲染
+  if (role === "assistant") {
     contentEl.className = "md-body";
-    contentEl.innerHTML = window.marked.parse(String(content || ""));
+    contentEl.innerHTML = renderMarkdown(content);
     // 复制按钮（assistant 消息）
     const actions = document.createElement("div");
     actions.className = "msg-actions";
@@ -841,43 +874,159 @@ function addMessage(role, content, meta) {
   return div;
 }
 
-function addToolMsg(data) {
-  // 流式中的工具调用卡片：点击可展开查看参数/输出/耗时
-  const div = document.createElement("div");
-  div.className = "msg tool ts-card";
-  div.dataset.toolCallId = data.tool_call_id || "";
-  div.dataset.toolName = data.tool || "";
-  div.dataset.toolStatus = data.success === false ? "failed" : data.success === true ? "succeeded" : "pending";
-  const dur = data.duration_ms != null ? ` · ⏱ ${formatMs(data.duration_ms)}` : "";
-  const statusState = data.success === false ? "failed" : data.success === true ? "succeeded" : "pending";
-  const statusIcon = statusState === "failed" ? "❌" : statusState === "pending" ? "⏳" : "✅";
-  div.innerHTML = `
-    <div class="ts-header">
-      <span class="ts-icon">${data.tool === "delegate" ? "🌐" : "🛠"}</span>
-      <span class="ts-name">${esc(data.tool)}</span>
-      <span class="ts-status ${statusState === "failed" ? "err" : statusState === "pending" ? "pending" : "ok"}">${statusIcon}</span>
-      <span class="ts-dur">${dur}</span>
-      <span class="ts-args-preview">${esc(JSON.stringify(data.arguments || {}).slice(0, 50))}</span>
-      <span class="ts-caret">▾</span>
-    </div>
-    <div class="ts-body">
-      <div class="ts-section">
-        <div class="ts-label">📋 参数</div>
-        <pre class="ts-code">${esc(JSON.stringify(data.arguments || {}, null, 2))}</pre>
-      </div>
-      ${data.data && data.data !== "等待执行..." ? `
+const TOOL_STATUS_VIEW = {
+  pending: { className: "pending", icon: "⏳", label: "待执行" },
+  running: { className: "running", icon: "◌", label: "执行中" },
+  succeeded: { className: "ok", icon: "✓", label: "已完成" },
+  failed: { className: "err", icon: "!", label: "失败" },
+  unknown: { className: "unknown", icon: "?", label: "未采集" },
+};
+
+function hasOwn(value, key) {
+  return value != null && Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function resolveToolStatus(data) {
+  if (data && TOOL_STATUS_VIEW[data.status]) return data.status;
+  if (data && data.success === false) return "failed";
+  if (data && data.success === true) return "succeeded";
+  if (data && data.data === "等待执行...") return "pending";
+  return "unknown";
+}
+
+function toolStatusMarkup(status) {
+  const view = TOOL_STATUS_VIEW[status] || TOOL_STATUS_VIEW.unknown;
+  return `<span class="ts-status ${view.className}">${view.icon} ${view.label}</span>`;
+}
+
+function formatJsonValue(value) {
+  try {
+    const serialized = JSON.stringify(value, null, 2);
+    return serialized === undefined ? String(value) : serialized;
+  } catch (error) {
+    return String(value);
+  }
+}
+
+function formatToolOutput(value, limit = 1600) {
+  let text;
+  if (value === "") text = "（空字符串）";
+  else if (value === null) text = "null";
+  else if (value === undefined) text = "（未提供）";
+  else if (typeof value === "string") text = value;
+  else text = formatJsonValue(value);
+  return {
+    text: text.length > limit ? text.slice(0, limit) + "\n…（浏览器预览已截断）" : text,
+    clientTruncated: text.length > limit,
+  };
+}
+
+function hasToolOutput(data) {
+  if (data && typeof data.has_output === "boolean") return data.has_output;
+  if (!data || !hasOwn(data, "data") || data.data === undefined) return false;
+  if (data.data === "等待执行..." && resolveToolStatus(data) === "pending") return false;
+  return !(data.success === false && data.data === null);
+}
+
+function toolErrorText(error) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (hasOwn(error, "message")) return String(error.message ?? "");
+  return formatJsonValue(error);
+}
+
+function toolOutputHtml(tool, raw, options = {}) {
+  if (tool === "delegate") {
+    const summary = parseDelegateOutput(raw);
+    if (summary) {
+      const icon = summary.status === "SUCCEEDED" ? "✅" : summary.status === "PARTIAL" ? "⚠️" : "❌";
+      let html = `<div class="delegate-summary">
+        <div class="ds-row"><span>${icon} 编排状态: <b>${esc(summary.status)}</b></span>
+        <span>${summary.duration_ms != null ? `⏱ ${formatMs(summary.duration_ms)}` : ""}</span></div>`;
+      if (summary.agents && summary.agents.length) {
+        html += `<div class="ds-agents">${summary.agents.map((agent) => `
+          <span class="ds-agent ${agent.status === "SUCCEEDED" ? "ok" : "err"}">${agent.status === "SUCCEEDED" ? "✅" : "❌"} ${esc(agent.agent)}</span>`).join("")}</div>`;
+      }
+      if (summary.final_answer !== undefined && summary.final_answer !== null) {
+        html += `<div class="ds-answer">${esc(formatToolOutput(summary.final_answer, 600).text)}</div>`;
+      }
+      html += `</div>`;
+      return html + toolOutputNotice(options);
+    }
+  }
+  const output = formatToolOutput(raw);
+  return `<pre class="ts-code">${esc(output.text)}</pre>${toolOutputNotice({
+    ...options, clientTruncated: output.clientTruncated,
+  })}`;
+}
+
+function toolOutputNotice(options) {
+  const notices = [];
+  if (options.output_truncated) notices.push("服务端已截断输出");
+  if (options.clientTruncated) notices.push("浏览器已截断预览");
+  return notices.length ? `<p class="ts-meta">${esc(notices.join("；"))}</p>` : "";
+}
+
+function toolCardBodyHtml(data) {
+  const status = resolveToolStatus(data);
+  const args = data.arguments === undefined ? {} : data.arguments;
+  let outputSection;
+  if (hasToolOutput(data)) {
+    outputSection = `
       <div class="ts-section">
         <div class="ts-label">📤 输出</div>
-        ${toolOutputHtml(data.tool, data.data)}
-      </div>` : `<div class="ts-section"><div class="ts-label">⏳ 等待执行...</div></div>`}
-      ${data.error ? `
-      <div class="ts-section">
-        <div class="ts-label err-label">⚠️ 错误</div>
-        <pre class="ts-code err-code">${esc(data.error.message || JSON.stringify(data.error))}</pre>
-      </div>` : ""}
+        ${toolOutputHtml(data.tool, data.data, data)}
+      </div>`;
+  } else if (status === "pending") {
+    outputSection = `<div class="ts-section"><div class="ts-label">⏳ 尚未开始执行</div></div>`;
+  } else if (status === "running") {
+    outputSection = `<div class="ts-section"><div class="ts-label">◌ 正在执行，尚未返回输出</div></div>`;
+  } else if (status === "unknown") {
+    outputSection = `<div class="ts-section"><div class="ts-label">历史记录未采集完整工具输出</div></div>`;
+  } else {
+    outputSection = `<div class="ts-section"><div class="ts-label">工具未返回输出</div></div>`;
+  }
+  const errorText = toolErrorText(data.error);
+  const metadata = [];
+  if (data.duration_ms != null) metadata.push("耗时 " + formatMs(data.duration_ms));
+  if (Number(data.retries) > 0) metadata.push("重试 " + String(data.retries) + " 次");
+  if (data.output_type) metadata.push("输出类型 " + String(data.output_type));
+  return `
+    <div class="ts-section">
+      <div class="ts-label">📋 参数</div>
+      <pre class="ts-code">${esc(formatJsonValue(args))}</pre>
     </div>
+    ${outputSection}
+    ${errorText ? `
+    <div class="ts-section">
+      <div class="ts-label err-label">⚠️ 错误</div>
+      <pre class="ts-code err-code">${esc(errorText)}</pre>
+    </div>` : ""}
+    ${metadata.length ? `<p class="ts-meta">${esc(metadata.join(" · "))}</p>` : ""}
   `;
-  // 点击展开
+}
+
+function addToolMsg(data) {
+  // 工具卡片按稳定 tool_call_id 对应真实生命周期，历史记录复用同一套展示。
+  const normalized = { ...data, arguments: data.arguments === undefined ? {} : data.arguments };
+  const status = resolveToolStatus(normalized);
+  const div = document.createElement("div");
+  div.className = "msg tool ts-card";
+  div.dataset.toolCallId = normalized.tool_call_id || normalized.id || "";
+  div.dataset.toolName = normalized.tool || "";
+  div.dataset.toolStatus = status;
+  const dur = normalized.duration_ms != null ? `⏱ ${formatMs(normalized.duration_ms)}` : "";
+  div.innerHTML = `
+    <div class="ts-header">
+      <span class="ts-icon">${normalized.tool === "delegate" ? "🌐" : "🛠"}</span>
+      <span class="ts-name">${esc(normalized.tool || "tool")}</span>
+      ${toolStatusMarkup(status)}
+      <span class="ts-dur">${esc(dur)}</span>
+      <span class="ts-args-preview">${esc(formatJsonValue(normalized.arguments).slice(0, 50))}</span>
+      <span class="ts-caret">▾</span>
+    </div>
+    <div class="ts-body">${toolCardBodyHtml(normalized)}</div>
+  `;
   div.querySelector(".ts-header").addEventListener("click", () => {
     div.classList.toggle("open");
     const caret = div.querySelector(".ts-caret");
@@ -889,86 +1038,60 @@ function addToolMsg(data) {
 }
 
 // delegate 等编排工具的输出：结构化渲染而非原始 JSON
-function toolOutputHtml(tool, raw) {
-  if (tool === "delegate") {
-    const summary = parseDelegateOutput(raw);
-    if (summary) {
-      const icon = summary.status === "SUCCEEDED" ? "✅" : summary.status === "PARTIAL" ? "⚠️" : "❌";
-      let html = `<div class="delegate-summary">
-        <div class="ds-row"><span>${icon} 编排状态: <b>${esc(summary.status)}</b></span>
-        <span>${summary.duration_ms != null ? `⏱ ${formatMs(summary.duration_ms)}` : ""}</span></div>`;
-      if (summary.agents && summary.agents.length) {
-        html += `<div class="ds-agents">${summary.agents.map((a) => `
-          <span class="ds-agent ${a.status === "SUCCEEDED" ? "ok" : "err"}">${a.status === "SUCCEEDED" ? "✅" : "❌"} ${esc(a.agent)}</span>`).join("")}</div>`;
-      }
-      if (summary.final_answer) {
-        html += `<div class="ds-answer">${esc(String(summary.final_answer).slice(0, 300))}</div>`;
-      }
-      html += `</div>`;
-      return html;
-    }
-  }
-  return `<pre class="ts-code">${esc(String(raw).slice(0, 300))}</pre>`;
-}
-
-// 解析 delegate 工具输出：可能是对象或 JSON 字符串
 function parseDelegateOutput(raw) {
   try {
     let obj = raw;
     if (typeof raw === "string") {
-      try { obj = JSON.parse(raw); } catch (e) { return null; }
+      try { obj = JSON.parse(raw); } catch (error) { return null; }
     }
     // 工具信封（data 字段包装）
     if (obj && typeof obj === "object" && "data" in obj && !("status" in obj)) {
       const inner = obj.data;
-      if (typeof inner === "string") { try { return JSON.parse(inner); } catch (e) { return null; } }
+      if (typeof inner === "string") { try { return JSON.parse(inner); } catch (error) { return null; } }
       return inner;
     }
     return obj && typeof obj === "object" && "agent_results" in obj ? obj : null;
-  } catch (e) {
+  } catch (error) {
     return null;
   }
 }
 
-// 按工具名找到最近一张卡片（流式结果回填）
+function markToolRunning(data) {
+  const cards = $$("#messages .ts-card[data-tool-call-id]");
+  for (let index = cards.length - 1; index >= 0; index--) {
+    const card = cards[index];
+    if (!data.tool_call_id || card.dataset.toolCallId !== data.tool_call_id) continue;
+    if (card.dataset.toolStatus === "succeeded" || card.dataset.toolStatus === "failed") return;
+    card.dataset.toolStatus = "running";
+    const status = card.querySelector(".ts-status");
+    if (status) status.outerHTML = toolStatusMarkup("running");
+    const body = card.querySelector(".ts-body");
+    if (body) body.innerHTML = toolCardBodyHtml({ ...data, status: "running" });
+    return;
+  }
+}
+
+// 按稳定 ID 找到对应工具卡片；只有旧事件没有 ID 时才退回到最近的待完成同名卡片。
 function updateToolCard(name, data) {
   const cards = $$("#messages .ts-card[data-tool-call-id]");
-  for (let i = cards.length - 1; i >= 0; i--) {
-    const card = cards[i];
+  for (let index = cards.length - 1; index >= 0; index--) {
+    const card = cards[index];
     const callId = data.tool_call_id || "";
     const matchesId = callId && card.dataset.toolCallId === callId;
-    const matchesPendingName = !callId && card.dataset.toolName === name && card.dataset.toolStatus === "pending";
-    if (matchesId || matchesPendingName) {
-      // 更新状态和输出
-      const statusEl = card.querySelector(".ts-status");
-      const statusState = data.success === false ? "failed" : "succeeded";
-      statusEl.textContent = statusState === "failed" ? "❌" : "✅";
-      statusEl.className = "ts-status " + (statusState === "failed" ? "err" : "ok");
-      card.dataset.toolStatus = statusState;
-      if (data.duration_ms != null) {
-        const durEl = card.querySelector(".ts-dur");
-        durEl.textContent = " · ⏱ " + formatMs(data.duration_ms);
-      }
-      const body = card.querySelector(".ts-body");
-      if (data.data && data.data !== "等待执行...") {
-        body.innerHTML = `
-          <div class="ts-section">
-            <div class="ts-label">📋 参数</div>
-            <pre class="ts-code">${esc(JSON.stringify(data.arguments || {}, null, 2))}</pre>
-          </div>
-          <div class="ts-section">
-            <div class="ts-label">📤 输出</div>
-            ${toolOutputHtml(data.tool, data.data)}
-          </div>
-          ${data.error ? `
-          <div class="ts-section">
-            <div class="ts-label err-label">⚠️ 错误</div>
-            <pre class="ts-code err-code">${esc(data.error.message || JSON.stringify(data.error))}</pre>
-          </div>` : ""}
-        `;
-      }
-      return true;
-    }
+    const matchesPendingName = !callId && card.dataset.toolName === name
+      && ["pending", "running"].includes(card.dataset.toolStatus);
+    if (!matchesId && !matchesPendingName) continue;
+
+    const normalized = { ...data, arguments: data.arguments === undefined ? {} : data.arguments };
+    const statusState = resolveToolStatus(normalized);
+    card.dataset.toolStatus = statusState;
+    const status = card.querySelector(".ts-status");
+    if (status) status.outerHTML = toolStatusMarkup(statusState);
+    const duration = card.querySelector(".ts-dur");
+    if (duration) duration.textContent = normalized.duration_ms != null ? "⏱ " + formatMs(normalized.duration_ms) : "";
+    const body = card.querySelector(".ts-body");
+    if (body) body.innerHTML = toolCardBodyHtml(normalized);
+    return true;
   }
   return false;
 }
@@ -997,6 +1120,62 @@ function esc(s) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+const SAFE_MARKDOWN_TAGS = new Set([
+  "a", "blockquote", "br", "code", "del", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+  "hr", "li", "ol", "p", "pre", "strong", "table", "tbody", "td", "th", "thead", "tr", "ul",
+]);
+const DROP_MARKDOWN_TAGS = new Set([
+  "base", "embed", "form", "iframe", "input", "math", "object", "script", "style", "svg", "video", "audio",
+]);
+
+function isSafeMarkdownHref(raw) {
+  const value = String(raw || "").trim();
+  if (!value || value.startsWith("//")) return false;
+  if (value.startsWith("#") || value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return true;
+  try {
+    const url = new URL(value, window.location.origin);
+    return ["http:", "https:", "mailto:"].includes(url.protocol);
+  } catch (error) {
+    return false;
+  }
+}
+
+function renderMarkdown(content) {
+  const source = String(content == null ? "" : content);
+  if (!window.marked || typeof window.marked.parse !== "function" || typeof document === "undefined") {
+    return esc(source);
+  }
+  let rendered;
+  try {
+    rendered = window.marked.parse(source, { headerIds: false, mangle: false });
+  } catch (error) {
+    return esc(source);
+  }
+  const template = document.createElement("template");
+  template.innerHTML = rendered;
+  template.content.querySelectorAll("*").forEach((element) => {
+    const tag = element.tagName.toLowerCase();
+    if (DROP_MARKDOWN_TAGS.has(tag)) {
+      element.remove();
+      return;
+    }
+    if (!SAFE_MARKDOWN_TAGS.has(tag)) {
+      element.replaceWith(document.createTextNode(element.textContent || ""));
+      return;
+    }
+    const href = element.getAttribute("href");
+    const title = element.getAttribute("title");
+    [...element.attributes].forEach((attribute) => element.removeAttribute(attribute.name));
+    if (tag === "a" && isSafeMarkdownHref(href)) {
+      element.setAttribute("href", href);
+      if (title) element.setAttribute("title", title);
+      element.setAttribute("target", "_blank");
+      element.setAttribute("rel", "noopener noreferrer");
+    }
+  });
+  return template.innerHTML;
 }
 
 /* ================= 工作流面板（Trace 树 v2） ================= */
@@ -1097,36 +1276,36 @@ function renderWorkflowBody(data) {
 
 function renderToolStepCard(tc, index) {
   const dur = tc.duration_ms != null ? formatMs(tc.duration_ms) : "";
-  const statusIcon = tc.status === "ERROR" ? "❌" : tc.error ? "❌" : "✅";
-  const statusCls = tc.status === "ERROR" || tc.error ? "err" : "ok";
-  const argsPreview = JSON.stringify(tc.arguments || {}).slice(0, 60);
-  const dataStr = tc.data ? String(tc.data).slice(0, 120) : "";
-  const errStr = tc.error ? (tc.error.message || JSON.stringify(tc.error)).slice(0, 120) : "";
+  const failed = tc.status === "ERROR" || Boolean(tc.error);
+  const status = failed ? "failed" : "succeeded";
+  const args = tc.arguments === undefined ? {} : tc.arguments;
+  const hasOutput = hasOwn(tc, "data") && tc.data !== undefined;
+  const errorText = toolErrorText(tc.error);
   return `
     <div class="ts-card" data-index="${index}">
       <div class="ts-header">
         <span class="ts-num">${index + 1}</span>
         <span class="ts-icon">🛠</span>
         <span class="ts-name">${esc(tc.name)}</span>
-        <span class="ts-status ${statusCls}">${statusIcon}</span>
+        ${toolStatusMarkup(status)}
         ${dur ? `<span class="ts-dur">⏱ ${dur}</span>` : ""}
-        <span class="ts-args-preview">${esc(argsPreview)}</span>
+        <span class="ts-args-preview">${esc(formatJsonValue(args).slice(0, 60))}</span>
         <span class="ts-caret">▾</span>
       </div>
       <div class="ts-body">
         <div class="ts-section">
           <div class="ts-label">📋 参数</div>
-          <pre class="ts-code">${esc(JSON.stringify(tc.arguments || {}, null, 2))}</pre>
+          <pre class="ts-code">${esc(formatJsonValue(args))}</pre>
         </div>
-        ${dataStr ? `
+        ${hasOutput ? `
         <div class="ts-section">
           <div class="ts-label">📤 输出</div>
-          <pre class="ts-code">${esc(dataStr)}${String(tc.data).length > 120 ? "\n..." : ""}</pre>
+          ${toolOutputHtml(tc.name, tc.data, tc)}
         </div>` : ""}
-        ${errStr ? `
+        ${errorText ? `
         <div class="ts-section">
           <div class="ts-label err-label">⚠️ 错误</div>
-          <pre class="ts-code err-code">${esc(errStr)}</pre>
+          <pre class="ts-code err-code">${esc(errorText)}</pre>
         </div>` : ""}
         ${dur ? `
         <div class="ts-meta">⏱ 耗时: ${dur}</div>` : ""}
@@ -1300,8 +1479,7 @@ async function send() {
       }
     }
     if (finalAnswer) {
-      contentEl.innerHTML = (window.marked && typeof window.marked.parse === "function")
-        ? window.marked.parse(finalAnswer) : esc(finalAnswer);
+      contentEl.innerHTML = renderMarkdown(finalAnswer);
       // 补复制按钮
       ensureCopyButton(assistantEl, finalAnswer);
     }
@@ -1402,8 +1580,7 @@ function handleFrame(frame, contentEl, onComplete) {
       );
       break;
     case "final":
-      contentEl.innerHTML = (window.marked && typeof window.marked.parse === "function")
-        ? window.marked.parse(data.content || "") : esc(data.content || "");
+      contentEl.innerHTML = renderMarkdown(data.content || "");
       updateExecutionStatus("running", "执行中", "正在整理最终回答");
       appendExecutionEvent("running", "已生成最终回答", "等待执行记录归档");
       break;
@@ -1481,6 +1658,8 @@ function bindEvents() {
   sendBtn.addEventListener("click", send);
   if (stopBtn) stopBtn.addEventListener("click", stopStreaming);
   input.addEventListener("keydown", (e) => {
+    // 中文等输入法组合阶段的 Enter 只用于选字，不能误发送任务。
+    if (e.isComposing) return;
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
   });
   input.addEventListener("input", () => {

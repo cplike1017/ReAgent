@@ -683,19 +683,23 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .ts-name { min-width: 0; flex: 0 1 auto; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 720; text-overflow: ellipsis; white-space: nowrap; }
 .ts-status {
   display: inline-flex;
-  min-width: 52px;
+  min-width: 66px;
   align-items: center;
   justify-content: center;
+  gap: 3px;
   padding: 3px 6px;
   border-radius: 999px;
   font-size: 10px;
   font-weight: 700;
+  white-space: nowrap;
 }
 .ts-status.pending { color: var(--warning); background: var(--warning-bg); }
 .ts-status.running { color: var(--info); background: var(--info-bg); }
 .ts-status.ok { color: var(--success); background: var(--success-bg); }
 .ts-status.err { color: var(--danger); background: var(--danger-bg); }
+.ts-status.unknown { color: var(--text-muted); background: var(--surface-hover); }
 .ts-dur { flex: 0 0 auto; color: var(--text-subtle); font-size: 11px; white-space: nowrap; }
+.ts-dur:empty { display: none; }
 .ts-args-preview { min-width: 0; flex: 1; overflow: hidden; color: var(--text-subtle); font-family: var(--font-mono); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .ts-caret { flex: 0 0 auto; color: var(--text-subtle); font-size: 11px; }
 .ts-body { display: none; padding: 0 12px 12px; border-top: 1px solid var(--border); }
