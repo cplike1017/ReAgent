@@ -112,6 +112,7 @@ def test_web_index(tmp_path):
         assert 'id="jump-latest"' in r.text
         assert 'id="live-orchestration-section"' in r.text
         assert 'id="execution-context-section"' in r.text
+        assert 'data-timeline-filter="attention"' in r.text
         script = client.get("/app.js").text
         assert "tool-output-detail-btn" in script
         assert "/outputs/" in script
@@ -125,6 +126,7 @@ def test_web_index(tmp_path):
         assert "requestRejected" in script
         assert "registerExecutionEvent" in script
         assert "lastExecutionSeq" in script
+        assert "setTimelineFilter" in script
 
 
 def test_web_capabilities(tmp_path):

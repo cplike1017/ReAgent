@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -53,6 +53,16 @@ resetExecutionEventCursor();
 assert.strictEqual(registerExecutionEvent({
   execution_id: "execution-current", event_id: "event-1", seq: 1,
 }), true, "a fresh replay accepts its own history from the beginning");
+
+state.timelineFilter = "active";
+assert.strictEqual(timelineEventMatchesFilter("running"), true);
+assert.strictEqual(timelineEventMatchesFilter("success"), false);
+state.timelineFilter = "attention";
+assert.strictEqual(timelineEventMatchesFilter("warning"), true);
+assert.strictEqual(timelineEventMatchesFilter("error"), true);
+assert.strictEqual(timelineEventMatchesFilter("pending"), false);
+state.timelineFilter = "all";
+assert.strictEqual(timelineEventMatchesFilter("success"), true);
 '''
 
     result = subprocess.run(

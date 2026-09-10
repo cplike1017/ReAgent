@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=16">
+<link rel="stylesheet" href="/style.css?v=17">
 </head>
 <body data-theme="light">
 <div class="app-shell">
@@ -177,6 +177,12 @@
             <h3 id="timeline-heading">事件时间线</h3>
             <span id="timeline-count" class="count">0</span>
           </div>
+          <div class="timeline-filter-bar" role="group" aria-label="筛选事件状态">
+            <button class="timeline-filter active" type="button" data-timeline-filter="all" aria-pressed="true">全部</button>
+            <button class="timeline-filter" type="button" data-timeline-filter="active" aria-pressed="false">进行中</button>
+            <button class="timeline-filter" type="button" data-timeline-filter="success" aria-pressed="false">完成</button>
+            <button class="timeline-filter" type="button" data-timeline-filter="attention" aria-pressed="false">需关注</button>
+          </div>
           <ol id="execution-timeline" class="execution-timeline">
             <li class="timeline-empty">任务开始后，这里会展示真实的执行事件。</li>
           </ol>
@@ -217,6 +223,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=16"></script>
+<script src="/app.js?v=17"></script>
 </body>
 </html>

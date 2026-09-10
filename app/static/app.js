@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v16 */
+/* ReAgent Web UI 前端逻辑 v17 */
 "use strict";
 
 const state = {
@@ -15,6 +15,7 @@ const state = {
   lastExecutionSeq: 0,
   executionHistory: [],
   followLatest: true,
+  timelineFilter: "all",
   currentPlanVersion: null,
   planRevisions: 0,
   planSnapshots: new Map(),
@@ -22,6 +23,8 @@ const state = {
   orchestrationRuns: new Map(),
   executionContext: null,
 };
+
+const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -149,6 +152,63 @@ function executionQueueDetail(data) {
     : "正在分配执行资源";
 }
 
+function timelineEventMatchesFilter(kind) {
+  if (state.timelineFilter === "active") return kind === "pending" || kind === "running";
+  if (state.timelineFilter === "success") return kind === "success";
+  if (state.timelineFilter === "attention") return kind === "warning" || kind === "error";
+  return true;
+}
+
+function applyTimelineFilter() {
+  const list = $("#execution-timeline");
+  if (!list) return { total: 0, visible: 0 };
+
+  const items = Array.from(list.children).filter((item) => item.classList.contains("timeline-item"));
+  let visible = 0;
+  for (const item of items) {
+    const matches = timelineEventMatchesFilter(item.dataset.timelineKind || "");
+    item.hidden = !matches;
+    if (matches) visible += 1;
+  }
+
+  let empty = list.querySelector(".timeline-filter-empty");
+  if (items.length && !visible) {
+    if (!empty) {
+      empty = document.createElement("li");
+      empty.className = "timeline-empty timeline-filter-empty";
+      list.appendChild(empty);
+    }
+    empty.textContent = "当前筛选条件下没有事件。";
+  } else if (empty) {
+    empty.remove();
+  }
+
+  const count = $("#timeline-count");
+  if (count) {
+    count.textContent = items.length === visible ? String(items.length) : String(visible) + " / " + String(items.length);
+    count.setAttribute("aria-label", "显示 " + String(visible) + " 条，共 " + String(items.length) + " 条事件");
+  }
+  return { total: items.length, visible };
+}
+
+function updateTimelineFilterControls() {
+  $$('[data-timeline-filter]').forEach((button) => {
+    const selected = button.dataset.timelineFilter === state.timelineFilter;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function setTimelineFilter(filter, savePreference = true) {
+  if (!TIMELINE_FILTERS.has(filter)) return;
+  state.timelineFilter = filter;
+  updateTimelineFilterControls();
+  applyTimelineFilter();
+  if (savePreference) {
+    try { localStorage.setItem("reagent-timeline-filter", filter); } catch (e) { /* 忽略 */ }
+  }
+}
+
 function appendExecutionEvent(kind, title, detail, timestamp) {
   const list = $("#execution-timeline");
   if (!list) return;
@@ -157,6 +217,7 @@ function appendExecutionEvent(kind, title, detail, timestamp) {
 
   const item = document.createElement("li");
   item.className = "timeline-item " + kind;
+  item.dataset.timelineKind = kind;
   const heading = document.createElement("div");
   heading.className = "timeline-title";
   heading.textContent = title;
@@ -174,8 +235,8 @@ function appendExecutionEvent(kind, title, detail, timestamp) {
   });
   item.appendChild(time);
   list.appendChild(item);
-  list.scrollTop = list.scrollHeight;
-  $("#timeline-count").textContent = String(list.querySelectorAll(".timeline-item").length);
+  applyTimelineFilter();
+  if (!item.hidden) list.scrollTop = list.scrollHeight;
 }
 
 function clonePlanSteps(plan) {
@@ -2815,6 +2876,16 @@ function bindEvents() {
     }, { passive: true });
   }
   if (jumpLatest) jumpLatest.addEventListener("click", scrollToLatest);
+
+  $$('[data-timeline-filter]').forEach((button) => {
+    button.addEventListener("click", () => setTimelineFilter(button.dataset.timelineFilter));
+  });
+  try {
+    const savedTimelineFilter = localStorage.getItem("reagent-timeline-filter");
+    setTimelineFilter(TIMELINE_FILTERS.has(savedTimelineFilter) ? savedTimelineFilter : "all", false);
+  } catch (e) {
+    setTimelineFilter("all", false);
+  }
 
   const themeBtn = $("#theme-toggle");
   if (themeBtn) {
