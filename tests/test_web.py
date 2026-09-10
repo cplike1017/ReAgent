@@ -13,6 +13,7 @@ from app.config import Settings
 from app.execution.models import ExecutionStatus
 from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.main import create_app
+from app.tools.registry import ToolDefinition
 
 
 def _make_app(tmp_path, *, orchestrator_enabled: bool = False):
@@ -107,6 +108,9 @@ def test_web_index(tmp_path):
         assert 'id="jump-latest"' in r.text
         assert 'id="live-orchestration-section"' in r.text
         assert 'id="execution-context-section"' in r.text
+        script = client.get("/app.js").text
+        assert "tool-output-detail-btn" in script
+        assert "/outputs/" in script
 
 
 def test_web_capabilities(tmp_path):
@@ -393,6 +397,78 @@ def test_web_stream_persists_execution_events(tmp_path):
             f"/api/web/sessions/{done['session_id']}/executions"
         ).json()
         assert any(run["execution_id"] == header_execution_id for run in session_runs["executions"])
+
+
+def test_web_loads_tool_output_details_on_demand(tmp_path):
+    """SSE 只保留预览，完整脱敏结果通过 execution/output 关联按需读取。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "计算 123 * 456", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        tool_result = next(data for name, data in events if name == "tool_result")
+        assert tool_result["output_available"] is True
+        assert tool_result["output_id"]
+        detail = client.get(
+            f"/api/web/executions/{execution_id}/outputs/{tool_result['output_id']}"
+        )
+        assert detail.status_code == 200
+        payload = detail.json()
+        assert payload["execution_id"] == execution_id
+        assert payload["kind"] == "tool.result"
+        assert payload["truncated"] is False
+        # 详情保留 JSON 原始类型，事件预览则保持适合时间线展示的字符串。
+        assert str(payload["content"]) == tool_result["data"]
+
+        other = client.get(
+            f"/api/web/executions/exec_not_the_owner/outputs/{tool_result['output_id']}"
+        )
+        assert other.status_code == 404
+
+
+def test_web_redacts_tool_output_before_events_and_details(tmp_path):
+    """敏感键不能因新增详情接口绕过 SSE 或 SQLite 的脱敏边界。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        runtime = client.app.state.runtime
+        calculator = runtime.registry.get("calculator")
+        runtime.registry.register(
+            ToolDefinition(
+                name=calculator.name,
+                description=calculator.description,
+                input_model=calculator.input_model,
+                handler=lambda expression: {"token": "do-not-expose", "value": False},
+                timeout_seconds=calculator.timeout_seconds,
+                risk_level=calculator.risk_level,
+                required_permission=calculator.required_permission,
+                output_model=calculator.output_model,
+                extra=calculator.extra,
+            ),
+            overwrite=True,
+        )
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "计算 1 + 1", "agent_mode": "react"},
+        ) as response:
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        tool_result = next(data for name, data in events if name == "tool_result")
+        # 最终回答仍可引用工具结果；这里验证新增的工具事件与详情存储边界。
+        assert "do-not-expose" not in json.dumps(tool_result, ensure_ascii=False)
+        assert "[REDACTED]" in tool_result["data"]
+        persisted = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        stored_tool = next(item["payload"] for item in persisted if item["event_type"] == "tool_result")
+        assert "do-not-expose" not in json.dumps(stored_tool, ensure_ascii=False)
+        detail = client.get(
+            f"/api/web/executions/{execution_id}/outputs/{tool_result['output_id']}"
+        ).json()
+        assert detail["content"] == {"token_redacted": "[REDACTED]", "value": False}
 
 
 def test_web_execution_stream_replays_all_terminal_events(tmp_path):

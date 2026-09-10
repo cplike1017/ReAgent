@@ -741,6 +741,23 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .ts-code { display: block; max-height: 260px; margin: 0; padding: 9px; white-space: pre-wrap; word-break: break-word; }
 .err-code { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 25%, var(--border)); background: var(--danger-bg); }
 .ts-meta { margin-top: 8px; color: var(--text-subtle); font-size: 11px; }
+.tool-output-detail-btn {
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 11px;
+  font-weight: 650;
+}
+.tool-output-detail-btn:hover:not(:disabled) { background: var(--surface-hover); }
+.tool-output-detail-btn:disabled { cursor: wait; opacity: .72; }
+.ts-output-detail {
+  padding-top: 9px;
+  border-top: 1px dashed var(--border);
+}
+.ts-output-detail .ts-code { max-height: 420px; }
 
 .workflow {
   overflow: hidden;

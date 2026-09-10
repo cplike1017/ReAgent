@@ -43,3 +43,21 @@ class ExecutionEvent(BaseModel):
     event_type: str
     timestamp: str
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionOutput(BaseModel):
+    """执行事件关联的按需加载详情。
+
+    SSE 仅携带预览和 ``output_id``；受控后的完整值保存在这里，避免长输出
+    无限放大事件流，同时让历史执行仍可核对实际结果。
+    """
+
+    output_id: str
+    execution_id: str
+    kind: str
+    content: Any = None
+    content_type: str = "application/json"
+    original_bytes: int = 0
+    stored_bytes: int = 0
+    truncated: bool = False
+    created_at: str

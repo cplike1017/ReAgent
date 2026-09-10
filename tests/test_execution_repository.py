@@ -52,3 +52,41 @@ def test_running_execution_is_marked_interrupted_on_restart(tmp_path):
     assert record is not None
     assert record.status == ExecutionStatus.INTERRUPTED
     repository.close()
+
+
+def test_execution_outputs_are_redacted_bounded_and_isolated(tmp_path):
+    repository = SQLiteExecutionRepository(
+        f"sqlite:///{tmp_path}/outputs.db",
+        output_max_bytes=64,
+    )
+    for execution_id in ("exec_output", "exec_other"):
+        repository.create(
+            execution_id=execution_id,
+            session_id="session_output",
+            turn_id=f"turn_{execution_id}",
+            agent_mode="react",
+            input_preview="输出详情",
+        )
+
+    short = repository.store_output(
+        "exec_output",
+        kind="tool.result",
+        content={"answer": False, "api_key": "should-not-persist"},
+    )
+    loaded = repository.get_output("exec_output", short.output_id)
+    assert loaded is not None
+    assert loaded.content == {"answer": False, "api_key_redacted": "[REDACTED]"}
+    assert loaded.truncated is False
+    # output_id 不能脱离其所属 execution 被读取。
+    assert repository.get_output("exec_other", short.output_id) is None
+
+    large = repository.store_output(
+        "exec_output",
+        kind="tool.result",
+        content={"payload": "x" * 300},
+    )
+    assert large.truncated is True
+    assert large.original_bytes > 64
+    assert large.content["omitted"] is True
+    assert len(large.content["preview"].encode("utf-8")) <= 64
+    repository.close()

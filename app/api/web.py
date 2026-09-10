@@ -25,6 +25,7 @@ from app.errors import AgentError
 from app.execution.models import ExecutionStatus
 from app.orchestrator.events import OrchestrationHooks
 from app.tools.schemas import ToolResult
+from app.tracing.recorder import redact
 
 router = APIRouter(prefix="/api/web", tags=["web"])
 
@@ -168,7 +169,7 @@ async def web_chat(req: WebChatRequest, request: Request) -> dict:
         "plan": [step.model_dump() for step in result.plan],
         "plan_revisions": result.plan_revisions,
         "tool_calls": [
-            {"tool_call_id": call.id, "name": call.name, "arguments": call.arguments}
+            {"tool_call_id": call.id, "name": call.name, "arguments": redact(call.arguments)}
             for call in result.tool_calls
         ],
         "trace_id": result.trace_id,
@@ -194,7 +195,7 @@ def _build_trace_tree(request: Request, trace_id: str | None) -> dict | None:
 
 def _tool_calls_with_duration(result, trace_tree: dict | None) -> list[dict]:
     """把工具调用列表与 Trace 中的耗时关联（按顺序配对 tool.execute span）。"""
-    calls = [{"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls]
+    calls = [{"tool_call_id": tc.id, "name": tc.name, "arguments": redact(tc.arguments)} for tc in result.tool_calls]
     if not trace_tree or not calls:
         return calls
     # 收集 trace 树中所有 tool.execute span 的耗时（按出现顺序）
@@ -294,7 +295,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                             "id": tool_call.id,
                             "tool_call_id": tool_call.id,
                             "name": tool_call.name,
-                            "arguments": tool_call.arguments,
+                            "arguments": redact(tool_call.arguments),
                         }
                         for tool_call in response.tool_calls
                     ],
@@ -310,31 +311,56 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "step": step,
                     "tool": tc.name,
                     "tool_call_id": tc.id,
-                    "arguments": tc.arguments,
+                    "arguments": redact(tc.arguments),
                 },
             )
 
+        def _tool_output_payload(envelope: ToolResult, *, kind: str) -> dict:
+            """为 SSE 生成受限预览，并把完整脱敏值留在按需详情存储中。"""
+            # 数据边界：实时事件与详情存储均使用相同的脱敏值；不让详情接口
+            # 成为 SSE 预览之外的敏感数据旁路。
+            safe_output = redact(envelope.data)
+            output, truncated = _preview(safe_output, 1000)
+            has_output = envelope.success or envelope.data is not None
+            detail = None
+            detail_unavailable = False
+            if has_output:
+                try:
+                    detail = repository.store_output(
+                        execution_id,
+                        kind=kind,
+                        content=envelope.data,
+                    )
+                except Exception:
+                    # 详情采集失败不应掩盖真实工具结果；前端会明确没有可加载详情。
+                    detail_unavailable = True
+            return {
+                # None 可能是成功工具的真实返回值；失败信封的默认 None 则不应
+                # 被前端误展示为“null 输出”。用独立字段保留这个事实边界。
+                "has_output": has_output,
+                "data": output,
+                "output_truncated": truncated,
+                "output_type": type(envelope.data).__name__,
+                "output_id": detail.output_id if detail is not None else None,
+                "output_available": detail is not None,
+                "output_detail_unavailable": detail_unavailable,
+                "output_detail_truncated": detail.truncated if detail is not None else False,
+                "output_bytes": detail.original_bytes if detail is not None else None,
+            }
+
         async def _hook_after_tool(tc, envelope: ToolResult, step: int) -> None:
-            output, truncated = _preview(envelope.data, 1000)
-            await _emit(
-                "tool_result",
-                {
-                    "step": step,
-                    "tool": tc.name,
-                    "tool_call_id": tc.id,
-                    "arguments": tc.arguments,
-                    "success": envelope.success,
-                    # None 可能是成功工具的真实返回值；失败信封的默认 None 则不应
-                    # 被前端误展示为“null 输出”。用独立字段保留这个事实边界。
-                    "has_output": envelope.success or envelope.data is not None,
-                    "data": output,
-                    "output_truncated": truncated,
-                    "output_type": type(envelope.data).__name__,
-                    "error": envelope.error.model_dump() if envelope.error else None,
-                    "duration_ms": (envelope.metadata or {}).get("duration_ms"),
-                    "retries": (envelope.metadata or {}).get("retries", 0),
-                },
-            )
+            payload = {
+                "step": step,
+                "tool": tc.name,
+                "tool_call_id": tc.id,
+                "arguments": redact(tc.arguments),
+                "success": envelope.success,
+                "error": envelope.error.model_dump() if envelope.error else None,
+                "duration_ms": (envelope.metadata or {}).get("duration_ms"),
+                "retries": (envelope.metadata or {}).get("retries", 0),
+            }
+            payload.update(_tool_output_payload(envelope, kind="tool.result"))
+            await _emit("tool_result", payload)
 
         async def _hook_before_final(response, step: int) -> None:
             await _emit(
@@ -541,7 +567,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "is_final": response.is_final_answer,
                     "content_preview": _preview(response.content or "", 360)[0] if response.is_final_answer else "",
                     "tool_calls": [
-                        {"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        {"tool_call_id": tc.id, "name": tc.name, "arguments": redact(tc.arguments)}
                         for tc in response.tool_calls
                     ],
                 },
@@ -557,32 +583,26 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "step": step,
                     "tool_call_id": tc.id,
                     "tool": tc.name,
-                    "arguments": tc.arguments,
+                    "arguments": redact(tc.arguments),
                 },
             )
 
         async def _hook_agent_tool_completed(run_id, agent_instance_id, profile: str, tc, envelope: ToolResult, step: int) -> None:
-            output, truncated = _preview(envelope.data, 1000)
-            await _emit(
-                "agent.tool.completed",
-                {
-                    "run_id": run_id,
-                    "agent_instance_id": agent_instance_id,
-                    "agent_profile": profile,
-                    "step": step,
-                    "tool_call_id": tc.id,
-                    "tool": tc.name,
-                    "arguments": tc.arguments,
-                    "success": envelope.success,
-                    "has_output": envelope.success or envelope.data is not None,
-                    "data": output,
-                    "output_truncated": truncated,
-                    "output_type": type(envelope.data).__name__,
-                    "error": envelope.error.model_dump() if envelope.error else None,
-                    "duration_ms": (envelope.metadata or {}).get("duration_ms"),
-                    "retries": (envelope.metadata or {}).get("retries", 0),
-                },
-            )
+            payload = {
+                "run_id": run_id,
+                "agent_instance_id": agent_instance_id,
+                "agent_profile": profile,
+                "step": step,
+                "tool_call_id": tc.id,
+                "tool": tc.name,
+                "arguments": redact(tc.arguments),
+                "success": envelope.success,
+                "error": envelope.error.model_dump() if envelope.error else None,
+                "duration_ms": (envelope.metadata or {}).get("duration_ms"),
+                "retries": (envelope.metadata or {}).get("retries", 0),
+            }
+            payload.update(_tool_output_payload(envelope, kind="agent.tool.result"))
+            await _emit("agent.tool.completed", payload)
 
         async def _hook_agent_finished(event_name: str, run_id, agent_instance_id, step_index: int, result) -> None:
             await _emit(
@@ -851,6 +871,18 @@ async def web_execution_events(
         "last_seq": record.last_seq,
         "events": [event.model_dump(mode="json") for event in events],
     }
+
+
+@router.get("/executions/{execution_id}/outputs/{output_id}")
+async def web_execution_output(execution_id: str, output_id: str, request: Request) -> dict:
+    """按需读取与本次运行关联的受控工具输出详情。"""
+    repository = _get_execution_repository(request)
+    if repository.get(execution_id) is None:
+        raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
+    output = repository.get_output(execution_id, output_id)
+    if output is None:
+        raise HTTPException(status_code=404, detail=f"执行输出不存在: {output_id}")
+    return output.model_dump(mode="json")
 
 
 @router.get("/sessions/{session_id}/executions")

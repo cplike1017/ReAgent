@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v10 */
+/* ReAgent Web UI 前端逻辑 v11 */
 "use strict";
 
 const state = {
@@ -1649,7 +1649,15 @@ function toolOutputNotice(options) {
   const notices = [];
   if (options.output_truncated) notices.push("服务端已截断输出");
   if (options.clientTruncated) notices.push("浏览器已截断预览");
-  return notices.length ? `<p class="ts-meta">${esc(notices.join("；"))}</p>` : "";
+  if (options.output_detail_truncated) notices.push("详情已按保留上限截断");
+  if (options.output_detail_unavailable) notices.push("完整详情未采集");
+  const notice = notices.length ? `<p class="ts-meta">${esc(notices.join("；"))}</p>` : "";
+  const outputId = options.output_id ? String(options.output_id) : "";
+  // 只携带不透明 output_id；完整内容在用户显式点击后再按 execution 请求。
+  const detailAction = outputId && options.output_available !== false
+    ? `<button type="button" class="tool-output-detail-btn" data-output-id="${esc(outputId)}">查看完整输出</button>`
+    : "";
+  return notice + detailAction;
 }
 
 function toolCardBodyHtml(data) {
@@ -1699,6 +1707,7 @@ function addToolMsg(data) {
   div.className = "msg tool ts-card";
   div.dataset.toolCallId = normalized.tool_call_id || normalized.id || "";
   div.dataset.toolName = normalized.tool || "";
+  div.dataset.executionId = normalized.execution_id || state.executionId || "";
   div.dataset.toolStatus = status;
   const dur = normalized.duration_ms != null ? `⏱ ${formatMs(normalized.duration_ms)}` : "";
   div.innerHTML = `
@@ -1717,6 +1726,7 @@ function addToolMsg(data) {
     const caret = div.querySelector(".ts-caret");
     caret.textContent = div.classList.contains("open") ? "▴" : "▾";
   });
+  bindToolOutputDetailAction(div);
   $("#messages").appendChild(div);
   scrollToBottom();
   return div;
@@ -1769,6 +1779,7 @@ function updateToolCard(name, data) {
 
     const normalized = { ...data, arguments: data.arguments === undefined ? {} : data.arguments };
     const statusState = resolveToolStatus(normalized);
+    if (normalized.execution_id) card.dataset.executionId = normalized.execution_id;
     card.dataset.toolStatus = statusState;
     const status = card.querySelector(".ts-status");
     if (status) status.outerHTML = toolStatusMarkup(statusState);
@@ -1776,9 +1787,81 @@ function updateToolCard(name, data) {
     if (duration) duration.textContent = normalized.duration_ms != null ? "⏱ " + formatMs(normalized.duration_ms) : "";
     const body = card.querySelector(".ts-body");
     if (body) body.innerHTML = toolCardBodyHtml(normalized);
+    bindToolOutputDetailAction(card);
     return true;
   }
   return false;
+}
+
+function bindToolOutputDetailAction(card) {
+  const button = card.querySelector(".tool-output-detail-btn");
+  if (!button) return;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleToolOutputDetail(card, button);
+  });
+}
+
+function formatOutputByteCount(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function appendToolOutputDetail(card, detail) {
+  const body = card.querySelector(".ts-body");
+  if (!body) return;
+  const existing = body.querySelector(".ts-output-detail");
+  if (existing) existing.remove();
+  const section = document.createElement("section");
+  section.className = "ts-section ts-output-detail";
+  const label = document.createElement("div");
+  label.className = "ts-label";
+  label.textContent = "完整输出详情";
+  const metadata = document.createElement("p");
+  metadata.className = "ts-meta";
+  const details = ["原始 " + formatOutputByteCount(detail.original_bytes)];
+  if (detail.truncated) details.push("服务端按上限保留了截断预览");
+  else details.push("已按需加载");
+  metadata.textContent = details.join(" · ");
+  const output = document.createElement("pre");
+  output.className = "ts-code";
+  // 详情内容必须以 textContent 写入，不把工具返回数据当作 HTML。
+  output.textContent = formatToolOutput(detail.content, 16000).text;
+  section.append(label, metadata, output);
+  body.appendChild(section);
+}
+
+async function toggleToolOutputDetail(card, button) {
+  const openDetail = card.querySelector(".ts-output-detail");
+  if (openDetail) {
+    openDetail.remove();
+    button.textContent = "查看完整输出";
+    return;
+  }
+  const executionId = card.dataset.executionId || state.executionId;
+  const outputId = button.dataset.outputId;
+  if (!executionId || !outputId) {
+    button.textContent = "详情不可用";
+    button.disabled = true;
+    return;
+  }
+  button.disabled = true;
+  button.textContent = "正在加载…";
+  try {
+    const response = await fetch(
+      "/api/web/executions/" + encodeURIComponent(executionId) + "/outputs/" + encodeURIComponent(outputId)
+    );
+    if (!response.ok) throw new Error("详情请求失败（" + String(response.status) + "）");
+    const detail = await response.json();
+    appendToolOutputDetail(card, detail);
+    button.textContent = "收起完整输出";
+  } catch (error) {
+    button.textContent = "加载失败，重试";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function addErrorMsg(message) {

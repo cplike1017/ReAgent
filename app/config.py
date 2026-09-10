@@ -69,6 +69,8 @@ class Settings(BaseSettings):
 
     # ---------- SQLite ----------
     database_url: str = "sqlite:///./data/agent.db"
+    # 执行详情单条最大保留字节数；SSE 始终只发送更短的预览。
+    execution_output_max_bytes: int = 262144
 
     # ---------- Agent 运行时 ----------
     # Context Builder 滑动窗口条数

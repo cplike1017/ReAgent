@@ -112,7 +112,10 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         app.state.runtime = build_web_runtime(settings, recorder)
 
         # 4) 执行事件存储：页面刷新后仍可回放已发生的 Agent 生命周期。
-        execution_repository = SQLiteExecutionRepository(settings.database_url)
+        execution_repository = SQLiteExecutionRepository(
+            settings.database_url,
+            output_max_bytes=settings.execution_output_max_bytes,
+        )
         execution_repository.mark_running_interrupted()
         app.state.execution_repository = execution_repository
         # 现有 AgentRuntime 保存了回合级可变状态，直连 Web 模式先串行化执行，
