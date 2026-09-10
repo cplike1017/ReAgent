@@ -4,7 +4,16 @@
 Bring the local ReAgent checkout up to date with `origin/main`, apply the supplied environment configuration in the project-prescribed location, and start and verify the service.
 
 ## Current Phase
-Frontend implementation: delivered (2026-09-11)
+README rewrite and main-branch integration (2026-09-11)
+
+## README rewrite and main integration — current request
+
+- [x] Inspect the current README, runnable commands, configuration surface, and existing diagrams.
+- [x] Rewrite README as a complete normal-project entry point while retaining and updating useful architecture/workflow diagrams.
+- [x] Validate Markdown links, commands, and project facts against the repository.
+- [ ] Run the relevant regression suite, merge `codex/frontend-execution-ux` into local `main`, and rerun verification on the merge result.
+- [ ] Push `main` to `origin` without force-pushing.
+- Scope: documentation and the requested integration only; preserve credentials, runtime data, diagnostic artifacts, and unrelated user changes.
 
 ## Frontend implementation — current request
 

@@ -118,3 +118,13 @@
 
 - After the Fine-grained personal access token was configured, `git push -u origin codex/frontend-execution-ux` completed successfully.
 - The local branch now tracks `origin/codex/frontend-execution-ux`; no force push or update to `main` was performed.
+
+## README rewrite and main integration (2026-09-11)
+
+- Received request to rewrite the README into a normal project README, retain/update architecture diagrams, and merge `codex/frontend-execution-ux` into `main`.
+- Began a fresh documentation-and-integration phase; repository facts and branch state will be revalidated before editing or merging.
+- Read the existing README and recorded that it is stage/interview-led, includes valuable diagrams, but has stale test-count claims, a demo placeholder, and non-portable setup wording.
+- `git fetch origin --prune` failed once with an outbound GitHub port 443 connection error. No merge or remote mutation was attempted; remote state will be checked again before integration.
+- Rewrote `README.md` as a normal project README: product overview, capability table, prerequisites, cross-platform quick start, real-model configuration, two updated Mermaid diagrams, API/Web UI usage, Docker deployment, project layout, testing, security boundaries, documentation, and contribution guidance.
+- Validated all seven relative links, two Mermaid blocks, code-fence pairing, and trailing whitespace before replacing the original file. The original was UTF-16 LE, so a UTF-8 temporary file was safely verified and moved into the user-requested README path after `apply_patch` could not read the old encoding.
+- Full regression completed successfully: `260 passed` with one third-party Starlette deprecation warning; `node --check app/static/app.js` also passed. An initial README-check command had a PowerShell quoting syntax error, then the no-interpolation retry confirmed UTF-8 encoding, 7 valid local links, and 2 Mermaid blocks.

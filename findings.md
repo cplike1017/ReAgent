@@ -47,6 +47,15 @@
 - Real isolated orchestration verification: API returned two successful steps with `depends_on: []`; the UI rendered one dependency layer and zero inter-layer arrows (`layers=1`, `arrows=0`). The visible cards label both researcher and analyst “可并行”, rather than drawing a false researcher→analyst chain.
 - Reloading a real persisted session now reconstructs one honest “历史执行” panel for each tool-using turn. It restores the original calculator/Beijing/Shanghai arguments and retains the failed divide-by-zero status, while explicitly labels Trace/plan as not recorded instead of fabricating a success workflow.
 
+## README rewrite and integration (2026-09-11)
+
+- The current `README.md` is a 20 KB, stage-by-stage learning and interview-oriented guide rather than a conventional project entry point. It contains a useful Mermaid architecture diagram and an orchestration sketch that should be retained in a lighter, current form.
+- Its claims and commands need refresh: it advertises `240 passed` while the current suite has 260 passing tests; it includes a demo-video placeholder; and `cp .env.example .env` is not Windows-friendly for the active development environment.
+- The replacement README should lead with what ReAgent is, its core capabilities, prerequisites, quick start, configuration, Web UI/API usage, architecture, repository layout, testing, deployment, security, and contribution guidance. Stage-by-stage learning and interview material belongs in `docs/`, not in the primary project entry point.
+- `git fetch origin --prune` failed once in this phase with a GitHub port 443 connection error after the feature branch had already been pushed. Treat remote synchronization as pending and revalidate `origin/main` immediately before merge/push; do not assume the local remote-tracking ref is current.
+- The original README is UTF-16 LE. `apply_patch` cannot read that encoding, so the replacement was first created as a validated UTF-8 temporary file and then moved over the explicitly requested `README.md`. This intentional encoding normalization makes the README standard GitHub Markdown; Git reports the migration as a binary diff relative to the old UTF-16 blob.
+- The replacement contains two Mermaid diagrams, seven checked local Markdown links, portable Windows/POSIX setup commands, current API routes, Compose instructions, and no hard-coded test count or placeholder demo claim.
+
 ## Requirements
 - Pull upstream updates from `https://github.com/cplike1017/ReAgent` into this local checkout.
 - Use `C:\Users\15837\Desktop\env.txt` to configure the project.
