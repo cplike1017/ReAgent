@@ -129,9 +129,12 @@ def test_web_index(tmp_path):
         assert "setTimelineFilter" in script
         assert "timelineDetailNeedsExpansion" in script
         assert "canOpenExecutionHistory" in script
+        assert "advanceExecutionViewVersion" in script
+        assert "canChangeSession" in script
         style = client.get("/style.css").text
         assert ".timeline-detail-expand" in style
         assert ".execution-history-item:disabled" in style
+        assert '.session-item[aria-disabled="true"]' in style
 
 
 def test_web_capabilities(tmp_path):

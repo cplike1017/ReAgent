@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -75,6 +75,15 @@ assert.strictEqual(canOpenExecutionHistory("execution-current"), true);
 assert.strictEqual(canOpenExecutionHistory("execution-other"), false, "another live stream cannot overwrite the selected run");
 state.streaming = false;
 assert.strictEqual(canOpenExecutionHistory("execution-other"), true);
+const firstViewVersion = advanceExecutionViewVersion();
+assert.strictEqual(isCurrentExecutionViewVersion(firstViewVersion), true);
+const secondViewVersion = advanceExecutionViewVersion();
+assert.strictEqual(isCurrentExecutionViewVersion(firstViewVersion), false, "a newer selection invalidates stale responses");
+assert.strictEqual(isCurrentExecutionViewVersion(secondViewVersion), true);
+state.streaming = true;
+assert.strictEqual(canChangeSession(), false);
+state.streaming = false;
+assert.strictEqual(canChangeSession(), true);
 '''
 
     result = subprocess.run(

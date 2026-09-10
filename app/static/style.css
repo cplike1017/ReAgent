@@ -182,6 +182,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 }
 .new-session-btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
 .new-session-btn:active { transform: translateY(0); }
+.new-session-btn:disabled { cursor: not-allowed; opacity: .58; filter: none; transform: none; }
 
 .sidebar-section { min-width: 0; }
 .section-heading,
@@ -234,6 +235,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .agent-item:hover,
 .orch-item:hover { color: var(--sidebar-text); background: var(--sidebar-hover); }
 .session-item.active { color: #fff !important; background: rgb(104 130 255 / 30%); }
+.session-item[aria-disabled="true"] { cursor: not-allowed !important; opacity: .56; }
+.session-item[aria-disabled="true"]:hover { color: var(--sidebar-muted) !important; background: transparent; }
 .si-icon { flex: 0 0 auto; font-size: 12px; }
 .si-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .si-time { color: inherit; opacity: .68; font-size: 10px; }

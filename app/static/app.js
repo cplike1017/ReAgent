@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v19 */
+/* ReAgent Web UI 前端逻辑 v20 */
 "use strict";
 
 const state = {
@@ -16,6 +16,7 @@ const state = {
   executionHistory: [],
   followLatest: true,
   timelineFilter: "all",
+  executionViewVersion: 0,
   currentPlanVersion: null,
   planRevisions: 0,
   planSnapshots: new Map(),
@@ -28,6 +29,33 @@ const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+function advanceExecutionViewVersion() {
+  state.executionViewVersion += 1;
+  return state.executionViewVersion;
+}
+
+function isCurrentExecutionViewVersion(version) {
+  return version === state.executionViewVersion;
+}
+
+function canChangeSession() {
+  return !state.streaming;
+}
+
+function syncSessionNavigationState() {
+  const newSession = $("#new-session");
+  if (newSession) {
+    newSession.disabled = !canChangeSession();
+    newSession.title = canChangeSession() ? "新建会话" : "当前任务仍在执行；结束或停止后可切换会话";
+  }
+  $$("#session-list .session-item").forEach((item) => {
+    const locked = !canChangeSession();
+    item.setAttribute("aria-disabled", String(locked));
+    if (locked) item.title = "当前任务仍在执行；结束或停止后可切换会话";
+    else item.removeAttribute("title");
+  });
+}
 
 /* ================= 初始化 ================= */
 async function init() {
@@ -71,6 +99,7 @@ function registerExecutionEvent(event) {
 }
 
 function startExecution(data) {
+  advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || null;
   resetExecutionEventCursor();
@@ -1048,18 +1077,20 @@ function formatStoredTime(value) {
   return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
-async function loadExecutionHistory(sessionId) {
+async function loadExecutionHistory(sessionId, viewVersion = state.executionViewVersion) {
   const container = $("#execution-history");
   if (!sessionId) {
-    renderExecutionHistory([]);
+    if (isCurrentExecutionViewVersion(viewVersion)) renderExecutionHistory([]);
     return;
   }
   try {
     const response = await fetch("/api/web/sessions/" + encodeURIComponent(sessionId) + "/executions");
     if (!response.ok) throw new Error("HTTP " + String(response.status));
     const data = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
     renderExecutionHistory(data.executions || []);
   } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
     if (container) {
       container.replaceChildren();
       const message = document.createElement("p");
@@ -1092,24 +1123,28 @@ async function fetchAllExecutionEvents(executionId) {
 async function openExecutionHistory(executionId) {
   // 单一工作台状态不能同时承载两条活动流；锁定可避免晚到事件污染历史回放。
   if (!canOpenExecutionHistory(executionId)) return;
+  const viewVersion = advanceExecutionViewVersion();
   try {
     const response = await fetch("/api/web/executions/" + encodeURIComponent(executionId));
     if (!response.ok) throw new Error("执行记录读取失败");
     const record = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.streaming) return;
     const events = await fetchAllExecutionEvents(executionId);
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.streaming) return;
     replayExecution(record, events);
     renderExecutionHistory(state.executionHistory);
     if (isActiveExecutionStatus(record.status)) {
-      resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0);
+      resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0, viewVersion);
     }
   } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion)) return;
     addErrorMsg("加载执行记录失败: " + error.message);
   }
 }
 
-async function resumeExecutionEvents(record, afterSeq) {
+async function resumeExecutionEvents(record, afterSeq, viewVersion = state.executionViewVersion) {
   // 已有浏览器流在消费该执行时不再创建第二个订阅，避免时间线重复。
-  if (state.streaming) return;
+  if (state.streaming || !isCurrentExecutionViewVersion(viewVersion) || state.executionId !== record.execution_id) return;
   const controller = new AbortController();
   state.abortCtrl = controller;
   setStreaming(true);
@@ -1118,6 +1153,7 @@ async function resumeExecutionEvents(record, afterSeq) {
     stop.disabled = false;
     stop.style.display = "block";
   }
+  let completedSessionId = null;
 
   try {
     const response = await fetch(
@@ -1126,6 +1162,7 @@ async function resumeExecutionEvents(record, afterSeq) {
       { signal: controller.signal }
     );
     if (!response.ok) throw new Error("HTTP " + String(response.status));
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== record.execution_id) return;
     setConnStatus(true);
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -1138,33 +1175,41 @@ async function resumeExecutionEvents(record, afterSeq) {
       while ((index = buffer.indexOf("\n\n")) !== -1) {
         const frame = buffer.slice(0, index);
         buffer = buffer.slice(index + 2);
-        replayExecutionFrame(frame);
+        if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== record.execution_id) {
+          controller.abort();
+          return;
+        }
+        replayExecutionFrame(frame, viewVersion);
       }
     }
     const snapshotResponse = await fetch("/api/web/executions/" + encodeURIComponent(record.execution_id));
     if (snapshotResponse.ok) {
       const snapshot = await snapshotResponse.json();
+      if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== record.execution_id) return;
       if (!isActiveExecutionStatus(snapshot.status)) {
         const finalEvents = await fetchAllExecutionEvents(record.execution_id);
+        if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== record.execution_id) return;
         replayExecution(snapshot, finalEvents);
-        if (snapshot.session_id) openSession(snapshot.session_id);
+        completedSessionId = snapshot.session_id || null;
       }
     }
   } catch (error) {
-    if (error.name !== "AbortError") {
+    if (error.name !== "AbortError" && isCurrentExecutionViewVersion(viewVersion) && state.executionId === record.execution_id) {
       setConnStatus(false);
       markExecutionStateUncertain("执行事件连接已断开", "服务端任务可能仍在执行；可稍后从执行历史继续接续。");
     }
   } finally {
-    if (state.executionId === record.execution_id) {
+    if (state.abortCtrl === controller && isCurrentExecutionViewVersion(viewVersion) && state.executionId === record.execution_id) {
       $("#stop").style.display = "none";
       setStreaming(false);
-      loadExecutionHistory(record.session_id);
+      if (completedSessionId) void openSession(completedSessionId);
+      else loadExecutionHistory(record.session_id, viewVersion);
     }
   }
 }
 
-function replayExecutionFrame(frame) {
+function replayExecutionFrame(frame, viewVersion = state.executionViewVersion) {
+  if (!isCurrentExecutionViewVersion(viewVersion)) return;
   const lines = frame.split("\n");
   const eventLine = lines.find((line) => line.startsWith("event:"));
   const dataLine = lines.find((line) => line.startsWith("data:"));
@@ -1432,7 +1477,11 @@ async function loadSessions() {
         <span class="si-del" title="删除会话">✕</span>
       `;
       if (state.sessionId === s.session_id) li.classList.add("active");
+      const sessionLocked = !canChangeSession();
+      li.setAttribute("aria-disabled", String(sessionLocked));
+      if (sessionLocked) li.title = "当前任务仍在执行；结束或停止后可切换会话";
       li.addEventListener("click", (e) => {
+        if (!canChangeSession()) return;
         if (e.target.classList.contains("si-del")) {
           e.stopPropagation();
           deleteSession(s.session_id);
@@ -1442,10 +1491,13 @@ async function loadSessions() {
       });
       ul.appendChild(li);
     });
+    syncSessionNavigationState();
   } catch (e) { /* 忽略 */ }
 }
 
 async function openSession(sessionId) {
+  if (!canChangeSession()) return;
+  const viewVersion = advanceExecutionViewVersion();
   state.sessionId = sessionId;
   setNavigationOpen(false);
   // 高亮
@@ -1453,20 +1505,24 @@ async function openSession(sessionId) {
   // 加载消息
   try {
     const data = await fetch(`/api/web/sessions/${sessionId}/messages`).then((r) => r.json());
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
     renderHistory(data.messages || []);
     setStatus(`会话 ${sessionId.slice(-12)}`);
   } catch (e) {
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
     addErrorMsg("加载会话失败: " + e.message);
   }
-  loadOrchestrations(sessionId);
-  loadExecutionHistory(sessionId);
+  if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
+  loadOrchestrations(sessionId, viewVersion);
+  loadExecutionHistory(sessionId, viewVersion);
 }
 
 /* ================= 编排记录（委派结果持久化） ================= */
-async function loadOrchestrations(sessionId) {
+async function loadOrchestrations(sessionId, viewVersion = state.executionViewVersion) {
   try {
     const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
     const data = await fetch(`/api/web/orchestrations${q}`).then((r) => r.json());
+    if (!isCurrentExecutionViewVersion(viewVersion) || (sessionId && state.sessionId !== sessionId)) return;
     const ul = $("#orch-list");
     ul.innerHTML = "";
     $("#orch-count").textContent = data.count || 0;
@@ -1691,6 +1747,8 @@ function toolHistoryToCardData(message, declaredCall) {
 }
 
 function newSession() {
+  if (!canChangeSession()) return;
+  advanceExecutionViewVersion();
   state.sessionId = null;
   state.executionId = null;
   resetExecutionEventCursor();
@@ -2583,23 +2641,27 @@ function markExecutionStateUncertain(stage, detail) {
 
 async function reconcileDetachedExecution(executionId, assistantEl, contentEl) {
   if (!executionId || state.executionId !== executionId || state.streaming) return;
+  const viewVersion = state.executionViewVersion;
   try {
     const response = await fetch("/api/web/executions/" + encodeURIComponent(executionId));
     if (!response.ok) throw new Error("HTTP " + String(response.status));
     const record = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== executionId || state.streaming) return;
     setConnStatus(true);
     const events = await fetchAllExecutionEvents(executionId);
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== executionId || state.streaming) return;
     replayExecution(record, events);
     assistantEl.classList.remove("streaming");
 
     if (isActiveExecutionStatus(record.status)) {
       contentEl.textContent = "连接已恢复，正在从持久化执行记录继续接续…";
-      await resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0);
+      await resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0, viewVersion);
     } else {
       contentEl.textContent = "执行已结束，正在加载会话历史。";
       if (record.session_id) await openSession(record.session_id);
     }
   } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionId !== executionId || state.streaming) return;
     setConnStatus(false);
     markExecutionStateUncertain(
       "执行连接已断开，状态待确认",
@@ -2854,6 +2916,7 @@ function setStreaming(v) {
   const send = $("#send");
   if (send) send.disabled = v;
   if (!v) state.abortCtrl = null;
+  syncSessionNavigationState();
   renderExecutionHistory(state.executionHistory);
 }
 
@@ -3046,6 +3109,7 @@ async function loadFiles() {
 
 /* ================= 会话删除 ================= */
 async function deleteSession(sessionId) {
+  if (!canChangeSession()) return;
   if (!confirm(`删除会话 ${sessionId.slice(-12)}？`)) return;
   try {
     await fetch(`/api/web/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
