@@ -57,6 +57,25 @@ async def test_retry_on_network_error():
 
 
 @pytest.mark.asyncio
+async def test_retry_callback_reports_actual_network_attempts():
+    transport = _FlakyTransport(fail_count=2)
+    client = _make_client(transport, {"llm_max_retries": 2, "llm_retry_backoff": 0})
+    retries = []
+
+    async def on_retry(attempt, max_retries, error):
+        retries.append((attempt, max_retries, type(error).__name__, str(error)))
+
+    response = await client.chat([{"role": "user", "content": "hi"}], on_retry=on_retry)
+    assert response.content == "ok"
+    assert transport.calls == 3
+    assert [(attempt, max_retries, kind) for attempt, max_retries, kind, _ in retries] == [
+        (1, 2, "LLMError"),
+        (2, 2, "LLMError"),
+    ]
+    assert all("网络请求失败" in message for *_, message in retries)
+
+
+@pytest.mark.asyncio
 async def test_retry_on_5xx():
     """5xx 重试。"""
     class _FiveHundred(httpx.AsyncBaseTransport):

@@ -30,7 +30,7 @@ from app.agent.state import AgentState
 from app.checkpoint.models import CheckpointRecord
 from app.config import Settings, get_settings
 from app.errors import AgentError, CheckpointError
-from app.llm.client import BaseLLMClient, ToolCallRequest, create_llm_client
+from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest, create_llm_client
 from app.memory.store import MemoryStore
 from app.tools.builtin import build_default_registry
 from app.tools.gateway import ToolGateway
@@ -48,7 +48,7 @@ class _InstrumentedLLM:
         self._chat = chat_fn
 
     async def chat(self, messages, tools=None, **kwargs):
-        return await self._chat(messages, tools)
+        return await self._chat(messages, tools, **kwargs)
 
 
 class AgentRuntime:
@@ -118,7 +118,7 @@ class AgentRuntime:
     # ------------------------------------------------------------------
     # LLM 调用入口：包上 llm_call Span（记录 model / tokens / finish_reason）
     # ------------------------------------------------------------------
-    async def _llm_chat(self, messages: list[dict], tools: list[dict] | None) -> None:
+    async def _llm_chat(self, messages: list[dict], tools: list[dict] | None, **kwargs) -> LLMResponse:
         async with trace_span(
             "llm_call",
             "llm",
@@ -126,7 +126,7 @@ class AgentRuntime:
             attributes={"model": self.settings.llm_model},
             recorder=self.recorder,
         ) as span:
-            response = await self.llm.chat(messages, tools)
+            response = await self.llm.chat(messages, tools, **kwargs)
             span.attributes.update(
                 model=response.model or self.settings.llm_model,
                 finish_reason=response.finish_reason,
@@ -223,6 +223,22 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_decision:
             await self._extra_hooks.after_decision(response, step)
 
+    async def _hook_llm_retry_scheduled(
+        self,
+        step: int,
+        attempt: int,
+        max_retries: int,
+        error,
+    ) -> None:
+        if self._extra_hooks and self._extra_hooks.llm_retry_scheduled:
+            await self._extra_hooks.llm_retry_scheduled(
+                step, attempt, max_retries, error
+            )
+
+    async def _hook_llm_failed(self, step: int, error) -> None:
+        if self._extra_hooks and self._extra_hooks.llm_failed:
+            await self._extra_hooks.llm_failed(step, error)
+
     async def _hook_before_tool(self, tc, step: int) -> None:
         """工具开始前：把真实的开始时机暴露给外部观察钩子。"""
         if self._extra_hooks and self._extra_hooks.before_tool:
@@ -288,6 +304,22 @@ class AgentRuntime:
         if self._extra_hooks and self._extra_hooks.after_decision:
             await self._extra_hooks.after_decision(response, step)
 
+    async def _forward_plan_step_llm_retry(
+        self,
+        step: int,
+        attempt: int,
+        max_retries: int,
+        error,
+    ) -> None:
+        if self._extra_hooks and self._extra_hooks.llm_retry_scheduled:
+            await self._extra_hooks.llm_retry_scheduled(
+                step, attempt, max_retries, error
+            )
+
+    async def _forward_plan_step_llm_failed(self, step: int, error) -> None:
+        if self._extra_hooks and self._extra_hooks.llm_failed:
+            await self._extra_hooks.llm_failed(step, error)
+
     async def _forward_plan_step_before_tool(self, tool_call, step: int) -> None:
         if self._extra_hooks and self._extra_hooks.before_tool:
             await self._extra_hooks.before_tool(tool_call, step)
@@ -318,6 +350,8 @@ class AgentRuntime:
         return LoopHooks(
             before_llm=self._forward_plan_step_before_llm,
             after_decision=self._forward_plan_step_after_decision,
+            llm_retry_scheduled=self._forward_plan_step_llm_retry,
+            llm_failed=self._forward_plan_step_llm_failed,
             before_tool=self._forward_plan_step_before_tool,
             after_tool=self._forward_plan_step_after_tool,
             tool_retry_scheduled=self._forward_plan_step_tool_retry,
@@ -396,6 +430,8 @@ class AgentRuntime:
         return LoopHooks(
             before_llm=self._hook_before_llm,
             after_decision=self._hook_after_decision,
+            llm_retry_scheduled=self._hook_llm_retry_scheduled,
+            llm_failed=self._hook_llm_failed,
             before_tool=self._hook_before_tool,
             after_tool=self._hook_after_tool,
             tool_retry_scheduled=self._hook_tool_retry_scheduled,

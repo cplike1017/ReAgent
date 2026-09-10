@@ -26,7 +26,7 @@ from typing import Any, Awaitable, Callable
 
 from app.agent.models import AgentTurnResult
 from app.errors import AgentError
-from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
+from app.llm.client import BaseLLMClient, LLMResponse, LLMRetryHook, ToolCallRequest
 from app.tools.schemas import ToolResult
 
 
@@ -43,6 +43,9 @@ class LoopHooks:
     before_llm: Callable[[int, list[dict]], Awaitable[None]] | None = None
     # LLM 返回决策之后（保存"LLM 决策后"检查点）
     after_decision: Callable[[LLMResponse, int], Awaitable[None]] | None = None
+    # Client 实际安排下一次模型请求 / 最终失败（step, attempt, max_retries, error）
+    llm_retry_scheduled: Callable[[int, int, int, Any], Awaitable[None]] | None = None
+    llm_failed: Callable[[int, Any], Awaitable[None]] | None = None
     # 工具真正开始执行之前（用于实时状态，而非把已排队误展示成成功）
     before_tool: Callable[[ToolCallRequest, int], Awaitable[None]] | None = None
     # 每个工具执行完成之后（保存"工具执行后"检查点）
@@ -125,7 +128,22 @@ async def run_react_loop(
             request_tools = tools_schema
 
         # ---------- 2) LLM 决策 ----------
-        response: LLMResponse = await llm.chat(llm_messages, request_tools)
+        llm_retry_hook: LLMRetryHook | None = None
+        if hooks and hooks.llm_retry_scheduled:
+            async def _on_llm_retry(attempt: int, max_retries: int, error: Any) -> None:
+                await hooks.llm_retry_scheduled(steps, attempt, max_retries, error)
+
+            llm_retry_hook = _on_llm_retry
+        try:
+            response: LLMResponse = await llm.chat(
+                llm_messages,
+                request_tools,
+                on_retry=llm_retry_hook,
+            )
+        except Exception as exc:
+            if hooks and hooks.llm_failed:
+                await hooks.llm_failed(steps, exc)
+            raise
 
         if hooks and hooks.after_decision:
             await hooks.after_decision(response, steps)

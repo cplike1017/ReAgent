@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v12 */
+/* ReAgent Web UI 前端逻辑 v13 */
 "use strict";
 
 const state = {
@@ -758,6 +758,25 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
       agent.stage = "正在请求模型第 " + String(payload.step || "?") + " 轮决策";
     }
     appendExecutionEvent("running", String(payload.agent_profile || "子 Agent") + " 开始模型决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
+  } else if (type === "agent.llm.retry_scheduled") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    const attempt = Math.max(1, Number(payload.attempt) || 1);
+    const maxRetries = Math.max(0, Number(payload.max_retries) || 0);
+    const error = toolErrorText(payload.error);
+    if (agent) {
+      agent.status = "RUNNING";
+      agent.stage = "模型暂时失败，正在第 " + String(attempt) + "/" + String(maxRetries) + " 次重试";
+    }
+    appendExecutionEvent("warning", String(payload.agent_profile || "子 Agent") + " 模型准备重试", "第 " + String(payload.step || "?") + " 轮 · 第 " + String(attempt) + "/" + String(maxRetries) + " 次" + (error ? " · " + error : ""), timestamp);
+  } else if (type === "agent.llm.failed") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    const error = toolErrorText(payload.error);
+    if (agent) {
+      agent.status = "FAILED";
+      agent.stage = "模型调用失败";
+      agent.error = error || agent.error;
+    }
+    appendExecutionEvent("error", String(payload.agent_profile || "子 Agent") + " 模型调用失败", error, timestamp);
   } else if (type === "agent.decision") {
     const agent = upsertOrchestrationAgent(run, payload);
     if (agent) {
@@ -768,7 +787,7 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
     appendExecutionEvent(
       "running",
       String(payload.agent_profile || "子 Agent") + " 完成模型决策",
-      payload.is_final ? "正在整理子任务结果" : "已确定下一步",
+      modelUsageDetail(payload, payload.is_final ? "正在整理子任务结果" : "已确定下一步"),
       timestamp
     );
   } else if (type === "agent.tool.started" || type === "agent.tool.retry_scheduled" || type === "agent.tool.completed") {
@@ -1063,9 +1082,17 @@ function replayExecutionEvent(event) {
     appendExecutionEvent("running", "模型开始决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
     return;
   }
+  if (type === "llm.retry_scheduled") {
+    recordLLMRetry(payload, timestamp);
+    return;
+  }
+  if (type === "llm.failed") {
+    recordLLMFailure(payload, timestamp);
+    return;
+  }
   if (type === "step") {
     state.executionSteps = Math.max(state.executionSteps, Number(payload.step) || 0);
-    appendExecutionEvent("running", "模型完成决策", payload.is_final ? "正在组织最终回答" : "已确定下一步", timestamp);
+    appendExecutionEvent("running", "模型完成决策", modelUsageDetail(payload, payload.is_final ? "正在组织最终回答" : "已确定下一步"), timestamp);
     return;
   }
   if (type === "tool.started") {
@@ -1761,6 +1788,49 @@ function parseDelegateOutput(raw) {
   } catch (error) {
     return null;
   }
+}
+
+function modelUsageDetail(data, fallback = "") {
+  const details = [];
+  if (data.model) details.push(String(data.model));
+  const usage = data.usage && typeof data.usage === "object" ? data.usage : {};
+  const usageParts = [];
+  [
+    ["prompt_tokens", "输入"],
+    ["completion_tokens", "输出"],
+    ["total_tokens", "合计"],
+  ].forEach(([key, label]) => {
+    const value = Number(usage[key]);
+    if (Number.isFinite(value) && value >= 0) {
+      usageParts.push(label + " " + String(value) + (key === "total_tokens" ? " tokens" : ""));
+    }
+  });
+  details.push(usageParts.length ? usageParts.join(" / ") : "用量未采集");
+  if (fallback) details.push(fallback);
+  return details.join(" · ");
+}
+
+function recordLLMRetry(data, timestamp) {
+  const attempt = Math.max(1, Number(data.attempt) || 1);
+  const maxRetries = Math.max(0, Number(data.max_retries) || 0);
+  const error = toolErrorText(data.error);
+  updateExecutionStatus("running", "执行中", "模型暂时失败，正在重试");
+  appendExecutionEvent(
+    "warning",
+    "模型准备重试",
+    "第 " + String(data.step || "?") + " 轮 · 第 " + String(attempt) + "/" + String(maxRetries) + " 次" + (error ? " · " + error : ""),
+    timestamp
+  );
+}
+
+function recordLLMFailure(data, timestamp) {
+  const error = toolErrorText(data.error);
+  appendExecutionEvent(
+    "error",
+    "模型调用失败",
+    "第 " + String(data.step || "?") + " 轮" + (error ? " · " + error : ""),
+    timestamp
+  );
 }
 
 function recordToolRetry(data, timestamp) {
@@ -2472,11 +2542,17 @@ function handleFrame(frame, contentEl, onComplete) {
       updateExecutionStatus("running", "执行中", "正在请求模型第 " + String(data.step || "?") + " 轮决策");
       appendExecutionEvent("running", "模型开始决策", "第 " + String(data.step || "?") + " 轮");
       break;
+    case "llm.retry_scheduled":
+      recordLLMRetry(data, data.timestamp);
+      break;
+    case "llm.failed":
+      recordLLMFailure(data, data.timestamp);
+      break;
     case "step":
       state.executionSteps = Math.max(state.executionSteps, Number(data.step) || 0);
       renderExecutionMetrics();
       updateExecutionStatus("running", "执行中", "第 " + String(data.step || "?") + " 轮决策完成");
-      appendExecutionEvent("running", "模型完成决策", data.is_final ? "正在生成最终回答" : "已确定下一步");
+      appendExecutionEvent("running", "模型完成决策", modelUsageDetail(data, data.is_final ? "正在生成最终回答" : "已确定下一步"));
       if (data.tool_calls && data.tool_calls.length) {
         data.tool_calls.forEach((tc) => {
           addToolMsg({ tool: tc.name, arguments: tc.arguments, tool_call_id: tc.id, data: "等待执行..." });

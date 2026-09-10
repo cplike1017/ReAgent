@@ -16,7 +16,7 @@ import asyncio
 import json
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 from pydantic import BaseModel, Field
@@ -51,6 +51,10 @@ class LLMResponse(BaseModel):
     def is_final_answer(self) -> bool:
         """是否最终回答（没有工具调用即为最终回答）。"""
         return not self.tool_calls
+
+
+# 参数为即将开始的重试次数、最大重试数和本次瞬时失败的结构化异常。
+LLMRetryHook = Callable[[int, int, LLMError], Awaitable[None]]
 
 
 class BaseLLMClient(ABC):
@@ -119,6 +123,11 @@ class OpenAICompatClient(BaseLLMClient):
         url = self._build_url()
         max_retries = self.settings.llm_max_retries
         backoff = self.settings.llm_retry_backoff
+        on_retry: LLMRetryHook | None = kwargs.get("on_retry")
+
+        async def _notify_retry(next_attempt: int, error: LLMError) -> None:
+            if on_retry is not None:
+                await on_retry(next_attempt, max_retries, error)
 
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
@@ -126,17 +135,21 @@ class OpenAICompatClient(BaseLLMClient):
                 resp = await self._client.post(url, json=payload, headers=headers)
             except httpx.HTTPError as exc:
                 # 网络层错误（断连/超时）：瞬时，重试
-                last_exc = exc
+                retry_error = LLMError(f"LLM 网络请求失败: {exc}")
+                last_exc = retry_error
                 if attempt < max_retries:
+                    await _notify_retry(attempt + 1, retry_error)
                     await asyncio.sleep(backoff * (2**attempt))
                     continue
-                raise LLMError(f"LLM 网络请求失败: {exc}") from exc
+                raise retry_error from exc
 
             if resp.status_code != 200:
                 # 5xx / 429：瞬时，重试；4xx：不重试（参数/鉴权问题）
                 if resp.status_code >= 500 or resp.status_code == 429:
-                    last_exc = LLMError(f"LLM 接口返回 {resp.status_code}: {resp.text[:200]}")
+                    retry_error = LLMError(f"LLM 接口返回 {resp.status_code}: {resp.text[:200]}")
+                    last_exc = retry_error
                     if attempt < max_retries:
+                        await _notify_retry(attempt + 1, retry_error)
                         await asyncio.sleep(backoff * (2**attempt))
                         continue
                 raise LLMError(f"LLM 接口返回 {resp.status_code}: {resp.text[:300]}")

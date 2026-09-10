@@ -285,6 +285,31 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 {"step": step, "message_count": len(messages)},
             )
 
+        async def _hook_llm_retry_scheduled(step: int, attempt: int, max_retries: int, error) -> None:
+            await _emit(
+                "llm.retry_scheduled",
+                {
+                    "step": step,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": _retry_error_payload(error),
+                },
+            )
+
+        async def _hook_llm_failed(step: int, error) -> None:
+            await _emit(
+                "llm.failed",
+                {"step": step, "error": _retry_error_payload(error)},
+            )
+
+        def _usage_payload(response) -> dict:
+            usage = response.usage or {}
+            return {
+                key: usage[key]
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if isinstance(usage.get(key), (int, float))
+            }
+
         async def _hook_after_decision(response, step: int) -> None:
             await _emit(
                 "step",
@@ -301,6 +326,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     ],
                     "content_preview": _preview(response.content or "", 200)[0],
                     "is_final": response.is_final_answer,
+                    "model": response.model or settings.llm_model,
+                    "usage": _usage_payload(response),
                 },
             )
 
@@ -574,6 +601,40 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 },
             )
 
+        async def _hook_agent_llm_retry_scheduled(
+            run_id,
+            agent_instance_id,
+            profile: str,
+            step: int,
+            attempt: int,
+            max_retries: int,
+            error,
+        ) -> None:
+            await _emit(
+                "agent.llm.retry_scheduled",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "error": _retry_error_payload(error),
+                },
+            )
+
+        async def _hook_agent_llm_failed(run_id, agent_instance_id, profile: str, step: int, error) -> None:
+            await _emit(
+                "agent.llm.failed",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "error": _retry_error_payload(error),
+                },
+            )
+
         async def _hook_agent_decision(run_id, agent_instance_id, profile: str, response, step: int) -> None:
             await _emit(
                 "agent.decision",
@@ -584,6 +645,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "step": step,
                     "is_final": response.is_final_answer,
                     "content_preview": _preview(response.content or "", 360)[0] if response.is_final_answer else "",
+                    "model": response.model or settings.llm_model,
+                    "usage": _usage_payload(response),
                     "tool_calls": [
                         {"tool_call_id": tc.id, "name": tc.name, "arguments": redact(tc.arguments)}
                         for tc in response.tool_calls
@@ -717,6 +780,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             agent_scheduled=_hook_agent_scheduled,
             agent_started=_hook_agent_started,
             agent_llm_started=_hook_agent_llm_started,
+            agent_llm_retry_scheduled=_hook_agent_llm_retry_scheduled,
+            agent_llm_failed=_hook_agent_llm_failed,
             agent_decision=_hook_agent_decision,
             agent_tool_started=_hook_agent_tool_started,
             agent_tool_retry_scheduled=_hook_agent_tool_retry_scheduled,
@@ -732,6 +797,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
         hooks = LoopHooks(
             before_llm=_hook_before_llm,
             after_decision=_hook_after_decision,
+            llm_retry_scheduled=_hook_llm_retry_scheduled,
+            llm_failed=_hook_llm_failed,
             before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
             tool_retry_scheduled=_hook_tool_retry_scheduled,

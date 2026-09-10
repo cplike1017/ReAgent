@@ -10,17 +10,17 @@ import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.errors import ToolExecutionError
+from app.errors import LLMError, ToolExecutionError
 from app.execution.models import ExecutionStatus
 from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.main import create_app
 from app.tools.registry import ToolDefinition
 
 
-def _make_app(tmp_path, *, orchestrator_enabled: bool = False):
+def _make_app(tmp_path, *, orchestrator_enabled: bool = False, trace_enabled: bool = False):
     settings = Settings(
         environment="test",
-        trace_enabled=False,
+        trace_enabled=trace_enabled,
         memory_enabled=False,
         skills_enabled=True,
         agent_mode="react",
@@ -67,6 +67,9 @@ class _DelegatingLLM(BaseLLMClient):
         if any(message.get("role") == "tool" for message in messages):
             return LLMResponse(content="主任务已完成", model=self.model)
         if "资深研究员" in text:
+            on_retry = kwargs.get("on_retry")
+            if on_retry:
+                await on_retry(1, 2, LLMError("研究员模型上游暂时不可用"))
             return LLMResponse(content="研究员已完成核验", model=self.model)
         tool_names = {
             item.get("function", {}).get("name")
@@ -113,6 +116,9 @@ def test_web_index(tmp_path):
         assert "tool-output-detail-btn" in script
         assert "/outputs/" in script
         assert "tool.retry_scheduled" in script
+        assert "llm.retry_scheduled" in script
+        assert "agent.llm.retry_scheduled" in script
+        assert "modelUsageDetail" in script
 
 
 def test_web_capabilities(tmp_path):
@@ -205,6 +211,85 @@ def test_web_chat_stream_sse(tmp_path):
             assert "event: step" in body
             assert "event: tool_result" in body
             assert "event: done" in body
+
+
+def test_web_streams_llm_retry_and_usage_events(tmp_path):
+    """模型客户端实际通知重试后，SSE 与历史应保留重试、模型和用量事实。"""
+    class RetrySignalingLLM(BaseLLMClient):
+        model = "retry-signaling-test"
+
+        async def chat(self, messages, tools=None, **kwargs):
+            on_retry = kwargs.get("on_retry")
+            if on_retry:
+                await on_retry(1, 2, LLMError("模型上游暂时不可用"))
+            return LLMResponse(
+                content="模型恢复后完成",
+                model=self.model,
+                usage={"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            )
+
+    with TestClient(_make_app(tmp_path, trace_enabled=True)) as client:
+        runtime = client.app.state.runtime
+        llm = RetrySignalingLLM()
+        runtime.llm = llm
+        runtime.context_builder.llm = llm
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "你好", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        retry = next(data for name, data in events if name == "llm.retry_scheduled")
+        decision = next(data for name, data in events if name == "step")
+        assert retry["step"] == 1
+        assert retry["attempt"] == 1
+        assert retry["max_retries"] == 2
+        assert retry["error"]["type"] == "LLMError"
+        assert decision["model"] == "retry-signaling-test"
+        assert decision["usage"] == {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+        assert names.index("llm.started") < names.index("llm.retry_scheduled") < names.index("step")
+
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        assert [event["event_type"] for event in stored] == names
+
+
+def test_web_streams_llm_failure_event(tmp_path):
+    """模型最终失败不能只留下总错误，必须有对应轮次的 LLM 生命周期事件。"""
+    class FailingLLM(BaseLLMClient):
+        model = "failing-test"
+
+        async def chat(self, messages, tools=None, **kwargs):
+            raise LLMError("模型服务不可用")
+
+    with TestClient(_make_app(tmp_path)) as client:
+        runtime = client.app.state.runtime
+        llm = FailingLLM()
+        runtime.llm = llm
+        runtime.context_builder.llm = llm
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "你好", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        failed = next(data for name, data in events if name == "llm.failed")
+        assert failed["step"] == 1
+        assert failed["error"]["type"] == "LLMError"
+        assert failed["error"]["message"] == "模型服务不可用"
+        assert names.index("llm.started") < names.index("llm.failed") < names.index("error") < names.index("execution.failed")
+
+        record = client.get(f"/api/web/executions/{execution_id}").json()
+        assert record["status"] == "FAILED"
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        assert [event["event_type"] for event in stored] == names
 
 
 def test_web_streams_context_memory_skill_and_checkpoint_events(tmp_path):
@@ -326,6 +411,7 @@ def test_web_streams_and_persists_subagent_lifecycle_events(tmp_path):
             "agent.scheduled",
             "agent.started",
             "agent.llm.started",
+            "agent.llm.retry_scheduled",
             "agent.decision",
             "agent.completed",
             "orchestration.synthesis_started",
@@ -334,6 +420,7 @@ def test_web_streams_and_persists_subagent_lifecycle_events(tmp_path):
         assert required <= set(names)
         assert names.index("orchestration.started") < names.index("orchestration.plan_created")
         assert names.index("agent.scheduled") < names.index("agent.started")
+        assert names.index("agent.llm.started") < names.index("agent.llm.retry_scheduled") < names.index("agent.decision")
         assert names.index("agent.completed") < names.index("orchestration.completed")
 
         orchestration_started = next(data for name, data in events if name == "orchestration.started")
@@ -341,8 +428,12 @@ def test_web_streams_and_persists_subagent_lifecycle_events(tmp_path):
         plan = next(data for name, data in events if name == "orchestration.plan_created")
         scheduled = next(data for name, data in events if name == "agent.scheduled")
         completed = next(data for name, data in events if name == "agent.completed")
-        assert plan["run_id"] == scheduled["run_id"] == completed["run_id"] == run_id
-        assert scheduled["agent_instance_id"] == completed["agent_instance_id"] == f"{run_id}:agent:0"
+        retry = next(data for name, data in events if name == "agent.llm.retry_scheduled")
+        assert plan["run_id"] == scheduled["run_id"] == completed["run_id"] == retry["run_id"] == run_id
+        assert scheduled["agent_instance_id"] == completed["agent_instance_id"] == retry["agent_instance_id"] == f"{run_id}:agent:0"
+        assert retry["attempt"] == 1
+        assert retry["max_retries"] == 2
+        assert retry["error"]["type"] == "LLMError"
         assert scheduled["depends_on"] == []
         assert completed["status"] == "SUCCEEDED"
 

@@ -28,6 +28,8 @@ class OrchestrationHooks:
     agent_started: EventHook | None = None
     # 子 Agent 内部真实 ReAct 生命周期：run_id, instance_id, profile, ...
     agent_llm_started: EventHook | None = None
+    agent_llm_retry_scheduled: EventHook | None = None
+    agent_llm_failed: EventHook | None = None
     agent_decision: EventHook | None = None
     agent_tool_started: EventHook | None = None
     # Gateway 已确认下一次瞬时故障重试（run_id, instance_id, profile, tool_call, ...）

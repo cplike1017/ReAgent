@@ -115,6 +115,30 @@ class SubAgentExecutor:
                 step,
             )
 
+        async def _on_llm_retry(step: int, attempt: int, max_retries: int, error) -> None:
+            await notify(
+                hooks,
+                "agent_llm_retry_scheduled",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                step,
+                attempt,
+                max_retries,
+                error,
+            )
+
+        async def _on_llm_failed(step: int, error) -> None:
+            await notify(
+                hooks,
+                "agent_llm_failed",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                step,
+                error,
+            )
+
         async def _before_tool(tool_call, step: int) -> None:
             await notify(
                 hooks,
@@ -155,6 +179,8 @@ class SubAgentExecutor:
         react_hooks = LoopHooks(
             before_llm=_before_llm,
             after_decision=_after_decision,
+            llm_retry_scheduled=_on_llm_retry,
+            llm_failed=_on_llm_failed,
             before_tool=_before_tool,
             after_tool=_after_tool,
             tool_retry_scheduled=_on_tool_retry,
@@ -237,7 +263,7 @@ class _InstrumentedLLM:
             attributes={"model": self._model},
             recorder=self._recorder,
         ) as span:
-            response = await self._llm.chat(messages, tools)
+            response = await self._llm.chat(messages, tools, **kwargs)
             span.attributes.update(
                 model=response.model or self._model,
                 finish_reason=response.finish_reason,
