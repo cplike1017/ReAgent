@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v24 */
+/* ReAgent Web UI 前端逻辑 v25 */
 "use strict";
 
 const state = {
@@ -7,6 +7,7 @@ const state = {
   streaming: false,
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
   executionId: null,
+  executionQueuedAt: null,
   executionStartedAt: null,
   executionFinishedAt: null,
   executionTimer: null,
@@ -115,6 +116,19 @@ function registerExecutionEvent(event) {
   return true;
 }
 
+function timestampToMillis(value) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function markExecutionQueued(timestamp) {
+  state.executionQueuedAt = timestampToMillis(timestamp) || state.executionQueuedAt || Date.now();
+}
+
+function markExecutionStarted(timestamp) {
+  state.executionStartedAt = timestampToMillis(timestamp) || state.executionStartedAt || Date.now();
+}
+
 function startExecution(data) {
   advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
@@ -122,7 +136,8 @@ function startExecution(data) {
   resetExecutionEventCursor();
   renderExecutionHistory(state.executionHistory);
   if (data.session_id) state.sessionId = data.session_id;
-  state.executionStartedAt = Date.now();
+  state.executionQueuedAt = Date.now();
+  state.executionStartedAt = null;
   state.executionFinishedAt = null;
   const stop = $("#stop");
   if (stop) stop.disabled = false;
@@ -182,11 +197,14 @@ function renderExecutionMetrics() {
 }
 
 function formatExecutionElapsed() {
-  if (!state.executionStartedAt) return "0s";
+  const startedAt = state.executionStartedAt || state.executionQueuedAt;
+  if (!startedAt) return "0s";
   const endedAt = state.executionFinishedAt || Date.now();
-  const seconds = Math.max(0, Math.floor((endedAt - state.executionStartedAt) / 1000));
-  if (seconds < 60) return String(seconds) + "s";
-  return String(Math.floor(seconds / 60)) + "m " + String(seconds % 60) + "s";
+  const seconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+  const duration = seconds < 60
+    ? String(seconds) + "s"
+    : String(Math.floor(seconds / 60)) + "m " + String(seconds % 60) + "s";
+  return state.executionStartedAt ? duration : "排队 " + duration;
 }
 
 function formatMode(mode) {
@@ -1259,8 +1277,9 @@ function replayExecution(record, events) {
   state.executionId = record.execution_id;
   state.sessionId = record.session_id || state.sessionId;
   renderExecutionHistory(state.executionHistory);
-  state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
-  state.executionFinishedAt = Date.parse(record.finished_at) || null;
+  state.executionQueuedAt = timestampToMillis(record.created_at);
+  state.executionStartedAt = timestampToMillis(record.started_at);
+  state.executionFinishedAt = timestampToMillis(record.finished_at);
   state.executionSteps = 0;
   state.executionTools = 0;
   resetExecutionEventCursor();
@@ -1344,6 +1363,7 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "execution.queued") {
+    markExecutionQueued(timestamp);
     updateExecutionStatus("pending", "排队中", executionQueueDetail(payload));
     appendExecutionEvent("pending", "任务已进入执行队列", executionQueueDetail(payload), timestamp);
     return;
@@ -1365,6 +1385,7 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "execution.started") {
+    markExecutionStarted(timestamp);
     updateExecutionStatus("running", "执行中", "正在准备执行环境");
     appendExecutionEvent("running", "任务开始执行", payload.mode ? "模式：" + formatMode(payload.mode) : "", timestamp);
   }
@@ -1781,6 +1802,7 @@ function newSession() {
   state.sessionId = null;
   state.executionId = null;
   resetExecutionEventCursor();
+  state.executionQueuedAt = null;
   state.executionStartedAt = null;
   state.executionFinishedAt = null;
   state.executionSteps = 0;
@@ -2918,10 +2940,12 @@ function handleFrame(frame, contentEl, onComplete) {
 
   switch (event) {
     case "execution.queued":
+      markExecutionQueued(data.timestamp);
       updateExecutionStatus("pending", "排队中", executionQueueDetail(data));
       appendExecutionEvent("pending", "任务已进入执行队列", executionQueueDetail(data), data.timestamp);
       break;
     case "execution.started":
+      markExecutionStarted(data.timestamp);
       updateExecutionStatus("running", "执行中", "正在准备执行环境");
       appendExecutionEvent("running", "任务开始执行", data.mode ? "模式：" + formatMode(data.mode) : "", data.timestamp);
       break;
