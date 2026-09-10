@@ -107,3 +107,9 @@
 - `git push -u origin codex/frontend-execution-ux` failed once with `Recv failure: Connection was reset`; no retry of the same transport was performed.
 - Verified that GitHub SSH authentication is unavailable (`Permission denied (publickey)`). GitHub CLI is authenticated with repository write scope, but the API upload fallback timed out during TLS handshake before a tree, commit, or branch reference could be created.
 - Publication is therefore blocked by the current host's outbound GitHub transport; the commit and all implementation files remain intact locally and the existing remote `main` branch was not modified.
+
+## Local implementation service (2026-09-11)
+
+- The primary checkout was found back on `main` after the implementation commit. Its tracked files were preserved unchanged, and a separate worktree was created for `codex/frontend-execution-ux` at `D:\CodeSource\harness\agent-runtime-execution-ux`.
+- Started the implementation from that worktree on `http://127.0.0.1:8000`, loading the already configured root `.env` into the process without printing its values.
+- Final live-service check passed: `GET /health` returned HTTP 200, the page references `/app.js?v=5`, and the served JavaScript contains `function finalizeRun`.

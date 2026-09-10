@@ -53,6 +53,7 @@ Frontend implementation: publication blocked by network transport (2026-09-11)
 - Service configuration, dependency setup, startup, and verification are complete.
 - Source synchronization remains blocked: terminal Git transport could not connect to `github.com:443` in three distinct attempts, so the checkout remains at commit `894140bc0bc90e2967263e42db2a74c26f15f497` (2026-09-07). No pull occurred.
 - Frontend implementation is committed locally as `8e50773` on `codex/frontend-execution-ux`. Its push is currently blocked by a GitHub HTTPS connection reset; SSH authentication is unavailable on this machine, and the authenticated GitHub API upload path timed out before creating a branch reference. No remote branch was created or overwritten.
+- The primary checkout was switched back to `main` while the implementation was being delivered. To preserve that checkout, the implementation now runs from the separate `D:\CodeSource\harness\agent-runtime-execution-ux` worktree on port 8000; its health endpoint and versioned front-end assets were verified there.
 
 ## Decisions Made
 | Decision | Rationale |
