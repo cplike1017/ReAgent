@@ -23,13 +23,24 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
 
-const sandbox = { Date, JSON, Map, Math, Number, Set };
+const stopButton = { disabled: false, style: {} };
+const runStateBadge = { className: "", textContent: "" };
+const runStage = { textContent: "" };
+const sandbox = {
+  Date, JSON, Map, Math, Number, Set,
+  document: {
+    querySelector(selector) {
+      return { "#stop": stopButton, "#run-state-badge": runStateBadge, "#run-stage": runStage }[selector] || null;
+    },
+    querySelectorAll() { return []; },
+  },
+};
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -90,6 +101,48 @@ assert.strictEqual(canChangeSession(), true);
 state.executionStartedAt = Date.now() - 86410000;
 state.executionFinishedAt = Date.now() - 86400000;
 assert.strictEqual(formatExecutionElapsed(), "10s", "a finished historical run uses its persisted end time");
+assert.strictEqual(terminalExecutionOutcome("SUCCEEDED").uiStatus, "success");
+assert.strictEqual(terminalExecutionOutcome("FAILED").uiStatus, "error");
+assert.strictEqual(terminalExecutionOutcome("CANCELLED").uiStatus, "cancelled");
+assert.strictEqual(terminalExecutionOutcome("RUNNING"), null, "active records must not be rendered as a terminal cancellation");
+
+async function verifyCancellationState() {
+  state.executionId = "execution-cancel-race";
+  state.abortCtrl = {};
+  state.executionStartedAt = Date.now() - 1000;
+  state.executionFinishedAt = null;
+  stopButton.disabled = false;
+  sandbox.fetch = async () => ({
+    ok: true,
+    json: async () => ({ status: "SUCCEEDED", cancel_requested: false }),
+  });
+  await stopStreaming();
+  assert.strictEqual(runStateBadge.textContent, "已完成", "a completed run remains successful after a late cancel request");
+  assert.strictEqual(runStage.textContent, "任务已完成，取消请求未生效");
+
+  let resolveCancel;
+  sandbox.fetch = () => new Promise((resolve) => { resolveCancel = resolve; });
+  state.executionId = "execution-old";
+  state.abortCtrl = {};
+  stopButton.disabled = false;
+  const oldCancel = stopStreaming();
+  state.executionId = "execution-new";
+  advanceExecutionViewVersion();
+  runStateBadge.textContent = "新任务正在执行";
+  runStage.textContent = "新的运行不应被旧取消响应覆盖";
+  resolveCancel({
+    ok: true,
+    json: async () => ({ status: "CANCELLED", cancel_requested: false }),
+  });
+  await oldCancel;
+  assert.strictEqual(runStateBadge.textContent, "新任务正在执行", "a stale cancel response must not overwrite a newer run");
+  assert.strictEqual(runStage.textContent, "新的运行不应被旧取消响应覆盖");
+}
+
+verifyCancellationState().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 '''
 
     result = subprocess.run(

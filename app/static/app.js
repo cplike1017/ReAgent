@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v23 */
+/* ReAgent Web UI 前端逻辑 v24 */
 "use strict";
 
 const state = {
@@ -28,6 +28,12 @@ const state = {
 };
 
 const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
+const TERMINAL_EXECUTION_OUTCOMES = Object.freeze({
+  SUCCEEDED: { uiStatus: "success", stage: "任务已完成，取消请求未生效" },
+  FAILED: { uiStatus: "error", stage: "任务执行失败，取消请求未生效" },
+  CANCELLED: { uiStatus: "cancelled", stage: "服务端已确认停止" },
+  INTERRUPTED: { uiStatus: "error", stage: "执行被服务重启中断" },
+});
 const INSPECTOR_FOCUSABLE_SELECTOR = [
   "a[href]",
   "button:not([disabled])",
@@ -118,6 +124,8 @@ function startExecution(data) {
   if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
   state.executionFinishedAt = null;
+  const stop = $("#stop");
+  if (stop) stop.disabled = false;
   state.executionSteps = 0;
   state.executionTools = 0;
   state.followLatest = true;
@@ -1083,6 +1091,10 @@ function formatStoredStatus(status) {
 
 function isActiveExecutionStatus(status) {
   return status === "QUEUED" || status === "RUNNING";
+}
+
+function terminalExecutionOutcome(status) {
+  return TERMINAL_EXECUTION_OUTCOMES[status] || null;
 }
 
 function formatStoredTime(value) {
@@ -3007,19 +3019,24 @@ async function stopStreaming() {
   }
 
   button.disabled = true;
+  const executionId = state.executionId;
+  const viewVersion = state.executionViewVersion;
   updateExecutionStatus("running", "停止请求已发送", "正在等待服务端确认取消");
   appendExecutionEvent("warning", "已请求停止", "服务端确认后将结束执行");
   try {
     const response = await fetch(
-      "/api/web/executions/" + encodeURIComponent(state.executionId) + "/cancel",
+      "/api/web/executions/" + encodeURIComponent(executionId) + "/cancel",
       { method: "POST" }
     );
     if (!response.ok) throw new Error("HTTP " + String(response.status));
     const data = await response.json();
-    if (!data.cancel_requested && !isActiveExecutionStatus(data.status)) {
-      finishExecution("cancelled", "服务端已确认停止");
+    if (state.executionId !== executionId || !isCurrentExecutionViewVersion(viewVersion)) return;
+    const outcome = terminalExecutionOutcome(data.status);
+    if (!data.cancel_requested && outcome) {
+      finishExecution(outcome.uiStatus, outcome.stage);
     }
   } catch (error) {
+    if (state.executionId !== executionId || !isCurrentExecutionViewVersion(viewVersion)) return;
     button.disabled = false;
     addErrorMsg("停止请求失败: " + error.message);
   }
