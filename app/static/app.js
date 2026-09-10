@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v13 */
+/* ReAgent Web UI 前端逻辑 v14 */
 "use strict";
 
 const state = {
@@ -50,11 +50,11 @@ function startExecution(data) {
   clearExecutionContext();
   const title = $("#workspace-title");
   if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
-  updateExecutionStatus("running", "执行中", "正在准备执行环境");
+  updateExecutionStatus("pending", "正在提交", "正在提交任务");
   const list = $("#execution-timeline");
   if (list) list.replaceChildren();
   $("#timeline-count").textContent = "0";
-  appendExecutionEvent("running", "任务已受理", data.mode ? "模式：" + formatMode(data.mode) : "");
+  appendExecutionEvent("pending", "正在提交任务", data.mode ? "模式：" + formatMode(data.mode) : "");
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionTimer = window.setInterval(renderExecutionMetrics, 500);
   renderExecutionMetrics();
@@ -110,6 +110,12 @@ function formatMode(mode) {
 function truncateForWorkspace(value) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > 46 ? text.slice(0, 45) + "…" : text;
+}
+
+function executionQueueDetail(data) {
+  return data && data.queue_reason === "runtime_busy"
+    ? "运行时正在处理另一项任务"
+    : "正在分配执行资源";
 }
 
 function appendExecutionEvent(kind, title, detail, timestamp) {
@@ -898,6 +904,7 @@ function renderExecutionHistory(records) {
 
 function formatStoredStatus(status) {
   const labels = {
+    QUEUED: "排队中",
     RUNNING: "执行中",
     SUCCEEDED: "已完成",
     FAILED: "失败",
@@ -905,6 +912,10 @@ function formatStoredStatus(status) {
     INTERRUPTED: "已中断",
   };
   return labels[status] || status || "未知";
+}
+
+function isActiveExecutionStatus(status) {
+  return status === "QUEUED" || status === "RUNNING";
 }
 
 function formatStoredTime(value) {
@@ -962,7 +973,7 @@ async function openExecutionHistory(executionId) {
     const events = await fetchAllExecutionEvents(executionId);
     replayExecution(record, events);
     renderExecutionHistory(state.executionHistory);
-    if (record.status === "RUNNING") {
+    if (isActiveExecutionStatus(record.status)) {
       resumeExecutionEvents(record, events.length ? events[events.length - 1].seq : 0);
     }
   } catch (error) {
@@ -1007,7 +1018,7 @@ async function resumeExecutionEvents(record, afterSeq) {
     const snapshotResponse = await fetch("/api/web/executions/" + encodeURIComponent(record.execution_id));
     if (snapshotResponse.ok) {
       const snapshot = await snapshotResponse.json();
-      if (snapshot.status !== "RUNNING") {
+      if (!isActiveExecutionStatus(snapshot.status)) {
         const finalEvents = await fetchAllExecutionEvents(record.execution_id);
         replayExecution(snapshot, finalEvents);
         if (snapshot.session_id) openSession(snapshot.session_id);
@@ -1064,7 +1075,10 @@ function replayExecution(record, events) {
   if (status === "SUCCEEDED") finishExecution("success", "历史执行已完成");
   else if (status === "FAILED" || status === "INTERRUPTED") finishExecution("error", status === "INTERRUPTED" ? "执行被服务重启中断" : "历史执行失败");
   else if (status === "CANCELLED") finishExecution("cancelled", "历史执行已取消");
-  else {
+  else if (status === "QUEUED") {
+    updateExecutionStatus("pending", "排队中", "该运行正在等待可用执行资源；可继续接续事件");
+    state.executionTimer = window.setInterval(renderExecutionMetrics, 500);
+  } else {
     updateExecutionStatus("running", "执行中", "该运行仍在执行；可通过事件流继续接续");
     state.executionTimer = window.setInterval(renderExecutionMetrics, 500);
   }
@@ -1123,6 +1137,11 @@ function replayExecutionEvent(event) {
     appendExecutionEvent("success", "任务已完成", "", timestamp);
     return;
   }
+  if (type === "execution.queued") {
+    updateExecutionStatus("pending", "排队中", executionQueueDetail(payload));
+    appendExecutionEvent("pending", "任务已进入执行队列", executionQueueDetail(payload), timestamp);
+    return;
+  }
   if (type === "execution.cancel_requested") {
     appendExecutionEvent("warning", "已请求停止", "等待服务端确认", timestamp);
     return;
@@ -1140,7 +1159,8 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "execution.started") {
-    appendExecutionEvent("running", "任务已受理", payload.mode ? "模式：" + formatMode(payload.mode) : "", timestamp);
+    updateExecutionStatus("running", "执行中", "正在准备执行环境");
+    appendExecutionEvent("running", "任务开始执行", payload.mode ? "模式：" + formatMode(payload.mode) : "", timestamp);
   }
 }
 
@@ -2535,8 +2555,15 @@ function handleFrame(frame, contentEl, onComplete) {
   if (applyRuntimeLifecycleEvent(event, data, data.timestamp) || applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
 
   switch (event) {
+    case "execution.queued":
+      if (data.execution_id && data.execution_id !== state.executionId) startExecution(data);
+      updateExecutionStatus("pending", "排队中", executionQueueDetail(data));
+      appendExecutionEvent("pending", "任务已进入执行队列", executionQueueDetail(data), data.timestamp);
+      break;
     case "execution.started":
-      startExecution(data);
+      if (data.execution_id && data.execution_id !== state.executionId) startExecution(data);
+      updateExecutionStatus("running", "执行中", "正在准备执行环境");
+      appendExecutionEvent("running", "任务开始执行", data.mode ? "模式：" + formatMode(data.mode) : "", data.timestamp);
       break;
     case "llm.started":
       updateExecutionStatus("running", "执行中", "正在请求模型第 " + String(data.step || "?") + " 轮决策");
@@ -2638,7 +2665,7 @@ async function stopStreaming() {
     );
     if (!response.ok) throw new Error("HTTP " + String(response.status));
     const data = await response.json();
-    if (!data.cancel_requested && data.status !== "RUNNING") {
+    if (!data.cancel_requested && !isActiveExecutionStatus(data.status)) {
       finishExecution("cancelled", "服务端已确认停止");
     }
   } catch (error) {

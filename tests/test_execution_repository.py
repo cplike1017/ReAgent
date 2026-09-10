@@ -4,13 +4,21 @@ from app.execution.repository import SQLiteExecutionRepository
 
 def test_execution_events_are_ordered_and_queryable(tmp_path):
     repository = SQLiteExecutionRepository(f"sqlite:///{tmp_path}/events.db")
-    repository.create(
+    queued = repository.create(
         execution_id="exec_demo",
         session_id="session_demo",
         turn_id="turn_demo",
         agent_mode="react",
         input_preview="计算 1 + 1",
     )
+    assert queued.status == ExecutionStatus.QUEUED
+    assert queued.started_at is None
+
+    started = repository.start("exec_demo")
+    assert started.status == ExecutionStatus.RUNNING
+    assert started.started_at is not None
+    # 重复启动不应覆盖真实开始时间或重新切换状态。
+    assert repository.start("exec_demo").started_at == started.started_at
 
     first = repository.append_event("exec_demo", "execution.started", {"mode": "react"})
     second = repository.append_event(
@@ -37,20 +45,29 @@ def test_execution_events_are_ordered_and_queryable(tmp_path):
     repository.close()
 
 
-def test_running_execution_is_marked_interrupted_on_restart(tmp_path):
+def test_active_execution_is_marked_interrupted_on_restart(tmp_path):
     repository = SQLiteExecutionRepository(f"sqlite:///{tmp_path}/events.db")
+    repository.create(
+        execution_id="exec_queued",
+        session_id="session_demo",
+        turn_id="turn_queued",
+        agent_mode="plan",
+        input_preview="等待测试",
+    )
     repository.create(
         execution_id="exec_running",
         session_id="session_demo",
-        turn_id="turn_demo",
+        turn_id="turn_running",
         agent_mode="plan",
-        input_preview="测试",
+        input_preview="运行测试",
     )
+    repository.start("exec_running")
 
-    assert repository.mark_running_interrupted() == 1
-    record = repository.get("exec_running")
-    assert record is not None
-    assert record.status == ExecutionStatus.INTERRUPTED
+    assert repository.mark_running_interrupted() == 2
+    for execution_id in ("exec_queued", "exec_running"):
+        record = repository.get(execution_id)
+        assert record is not None
+        assert record.status == ExecutionStatus.INTERRUPTED
     repository.close()
 
 

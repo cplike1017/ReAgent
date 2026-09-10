@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 class ExecutionStatus(str, Enum):
     """一次用户任务的生命周期状态。"""
 
+    QUEUED = "QUEUED"
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
@@ -22,7 +23,7 @@ class ExecutionRecord(BaseModel):
     session_id: str
     turn_id: str
     agent_mode: str
-    status: ExecutionStatus = ExecutionStatus.RUNNING
+    status: ExecutionStatus = ExecutionStatus.QUEUED
     input_preview: str = ""
     created_at: str
     started_at: str | None = None

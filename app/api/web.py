@@ -30,6 +30,10 @@ from app.tracing.recorder import redact
 router = APIRouter(prefix="/api/web", tags=["web"])
 
 
+# QUEUED 表示服务已受理但尚未取得串行 Runtime 的执行槽；两者都可取消、续接。
+_ACTIVE_EXECUTION_STATUSES = {ExecutionStatus.QUEUED, ExecutionStatus.RUNNING}
+
+
 class WebChatRequest(BaseModel):
     """Web 聊天请求。"""
 
@@ -95,21 +99,34 @@ async def web_chat(req: WebChatRequest, request: Request) -> dict:
     turn_id = f"turn_{uuid4().hex[:12]}"
     execution_id = f"exec_{uuid4().hex[:12]}"
 
+    input_preview = _preview(req.message, 240)[0]
     repository.create(
         execution_id=execution_id,
         session_id=session_id,
         turn_id=turn_id,
         agent_mode=agent_mode,
-        input_preview=_preview(req.message, 240)[0],
+        input_preview=input_preview,
     )
     repository.append_event(
         execution_id,
-        "execution.started",
-        {"mode": agent_mode, "message_preview": _preview(req.message, 240)[0]},
+        "execution.queued",
+        {
+            "mode": agent_mode,
+            "message_preview": input_preview,
+            "queue_reason": "runtime_busy" if app.web_runtime_lock.locked() else "dispatching",
+        },
     )
 
     try:
         async with app.web_runtime_lock:
+            started = repository.start(execution_id)
+            if started.status != ExecutionStatus.RUNNING:
+                raise AgentError("执行在启动前已终止", code="EXECUTION_NOT_ACTIVE")
+            repository.append_event(
+                execution_id,
+                "execution.started",
+                {"mode": agent_mode, "message_preview": input_preview},
+            )
             old_mode = settings.agent_mode
             settings.agent_mode = agent_mode
             try:
@@ -822,16 +839,27 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
         async def _run() -> None:
             try:
                 current = repository.get(execution_id)
-                if current is None or current.status != ExecutionStatus.RUNNING:
+                if current is None or current.status not in _ACTIVE_EXECUTION_STATUSES:
                     return
                 await _emit(
-                    "execution.started",
+                    "execution.queued",
                     {
                         "mode": agent_mode,
                         "message_preview": _preview(req.message, 240)[0],
+                        "queue_reason": "runtime_busy" if app.web_runtime_lock.locked() else "dispatching",
                     },
                 )
                 async with app.web_runtime_lock:
+                    started = repository.start(execution_id)
+                    if started.status != ExecutionStatus.RUNNING:
+                        return
+                    await _emit(
+                        "execution.started",
+                        {
+                            "mode": agent_mode,
+                            "message_preview": _preview(req.message, 240)[0],
+                        },
+                    )
                     old_mode = settings.agent_mode
                     settings.agent_mode = agent_mode
                     try:
@@ -911,7 +939,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
         async def _confirm_cancelled_before_start() -> None:
             """覆盖 task.cancel() 发生在协程首次调度之前的极早取消窗口。"""
             record = repository.get(execution_id)
-            if record is None or record.status != ExecutionStatus.RUNNING:
+            if record is None or record.status not in _ACTIVE_EXECUTION_STATUSES:
                 return
             finished = repository.finish(
                 execution_id,
@@ -1045,7 +1073,7 @@ async def web_execution_stream(
             # 终态也可能有多页事件：先完整吐完 seq，再结束流。
             if current_seq < record.last_seq:
                 continue
-            if record.status != ExecutionStatus.RUNNING:
+            if record.status not in _ACTIVE_EXECUTION_STATUSES:
                 return
             yield ": keep-alive\n\n"
             await asyncio.sleep(0.35)
@@ -1064,7 +1092,7 @@ async def web_execution_cancel(execution_id: str, request: Request) -> dict:
     record = repository.get(execution_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"执行不存在: {execution_id}")
-    if record.status != ExecutionStatus.RUNNING:
+    if record.status not in _ACTIVE_EXECUTION_STATUSES:
         return {
             "execution_id": execution_id,
             "status": record.status.value,
@@ -1077,7 +1105,7 @@ async def web_execution_cancel(execution_id: str, request: Request) -> dict:
         task.cancel()
         return {
             "execution_id": execution_id,
-            "status": ExecutionStatus.RUNNING.value,
+            "status": record.status.value,
             "cancel_requested": True,
         }
 

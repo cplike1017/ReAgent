@@ -104,10 +104,10 @@ class SQLiteExecutionRepository:
             session_id=session_id,
             turn_id=turn_id,
             agent_mode=agent_mode,
-            status=ExecutionStatus.RUNNING,
+            status=ExecutionStatus.QUEUED,
             input_preview=input_preview,
             created_at=now,
-            started_at=now,
+            started_at=None,
         )
         with self._lock:
             self._conn.execute(
@@ -125,6 +125,40 @@ class SQLiteExecutionRepository:
             )
             self._conn.commit()
         return record
+
+    def start(self, execution_id: str) -> ExecutionRecord:
+        """把已受理的运行切换为真正开始执行。
+
+        Web Runtime 目前为避免共享回合状态串扰而串行化执行；因此创建记录
+        不等于已经拿到执行槽。这个转换把排队时间与模型/工具实际开始时间
+        明确区分，并保持对旧的 RUNNING 记录幂等。
+        """
+        now = utc_now()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM executions WHERE execution_id = ?", (execution_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"execution 不存在: {execution_id}")
+            if row["status"] == ExecutionStatus.QUEUED.value:
+                self._conn.execute(
+                    """
+                    UPDATE executions
+                    SET status = ?, started_at = ?
+                    WHERE execution_id = ? AND status = ?
+                    """,
+                    (
+                        ExecutionStatus.RUNNING.value,
+                        now,
+                        execution_id,
+                        ExecutionStatus.QUEUED.value,
+                    ),
+                )
+                self._conn.commit()
+                row = self._conn.execute(
+                    "SELECT * FROM executions WHERE execution_id = ?", (execution_id,)
+                ).fetchone()
+        return self._record_from_row(row)
 
     def get(self, execution_id: str) -> ExecutionRecord | None:
         with self._lock:
@@ -294,7 +328,7 @@ class SQLiteExecutionRepository:
         error_type: str = "",
         error_message: str = "",
     ) -> ExecutionRecord:
-        if status == ExecutionStatus.RUNNING:
+        if status in {ExecutionStatus.QUEUED, ExecutionStatus.RUNNING}:
             raise ValueError("finish 只能写入终态")
         now = utc_now()
         with self._lock:
@@ -303,7 +337,10 @@ class SQLiteExecutionRepository:
             ).fetchone()
             if existing is None:
                 raise KeyError(f"execution 不存在: {execution_id}")
-            if existing["status"] != ExecutionStatus.RUNNING.value:
+            if existing["status"] not in {
+                ExecutionStatus.QUEUED.value,
+                ExecutionStatus.RUNNING.value,
+            }:
                 return self._record_from_row(existing)
 
             self._conn.execute(
@@ -325,18 +362,19 @@ class SQLiteExecutionRepository:
         return self._record_from_row(row)
 
     def mark_running_interrupted(self) -> int:
-        """应用启动时标记前次进程异常退出留下的运行记录。"""
+        """应用启动时标记前次进程异常退出留下的活动运行记录。"""
         now = utc_now()
         with self._lock:
             cursor = self._conn.execute(
                 """
                 UPDATE executions
                 SET status = ?, finished_at = ?, error_type = ?, error_message = ?
-                WHERE status = ?
+                WHERE status IN (?, ?)
                 """,
                 (
                     ExecutionStatus.INTERRUPTED.value, now, "ProcessInterrupted",
                     "服务进程重启，执行未完成。",
+                    ExecutionStatus.QUEUED.value,
                     ExecutionStatus.RUNNING.value,
                 ),
             )

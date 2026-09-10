@@ -512,6 +512,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
   font-size: 11px;
   font-weight: 700;
 }
+.run-state-badge.pending { color: var(--warning); background: var(--warning-bg); }
 .run-state-badge.running { color: var(--info); background: var(--info-bg); }
 .run-state-badge.success { color: var(--success); background: var(--success-bg); }
 .run-state-badge.error { color: var(--danger); background: var(--danger-bg); }
@@ -973,6 +974,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
   background: var(--border);
   content: "";
 }
+.timeline-item.pending::before { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-bg); }
 .timeline-item.running::before { background: var(--info); box-shadow: 0 0 0 3px var(--info-bg); }
 .timeline-item.success::before { background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
 .timeline-item.error::before { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }

@@ -119,6 +119,7 @@ def test_web_index(tmp_path):
         assert "llm.retry_scheduled" in script
         assert "agent.llm.retry_scheduled" in script
         assert "modelUsageDetail" in script
+        assert "execution.queued" in script
 
 
 def test_web_capabilities(tmp_path):
@@ -144,6 +145,8 @@ def test_web_chat_sync(tmp_path):
         assert data["answer"]
         assert any(t["name"] == "get_weather" for t in data["tool_calls"])
         assert data["session_id"]
+        lifecycle = client.get(f"/api/web/executions/{data['execution_id']}/events").json()["events"]
+        assert [event["event_type"] for event in lifecycle[:2]] == ["execution.queued", "execution.started"]
 
 
 def test_web_chat_returns_trace(tmp_path):
@@ -466,7 +469,8 @@ def test_web_stream_persists_execution_events(tmp_path):
                 ))
 
         event_names = [name for name, _ in parsed]
-        assert {"execution.started", "llm.started", "step", "tool.started", "tool_result", "done"} <= set(event_names)
+        assert {"execution.queued", "execution.started", "llm.started", "step", "tool.started", "tool_result", "done"} <= set(event_names)
+        assert event_names.index("execution.queued") < event_names.index("execution.started") < event_names.index("llm.started")
         done = next(data for name, data in parsed if name == "done")
         assert done["execution_id"] == header_execution_id
 
@@ -630,6 +634,7 @@ def test_web_execution_stream_replays_all_terminal_events(tmp_path):
         stored = client.get(f"/api/web/executions/{execution_id}/events").json()
         replay = client.get(f"/api/web/executions/{execution_id}/stream?after_seq=0")
         assert replay.status_code == 200
+        assert "event: execution.queued" in replay.text
         assert "event: execution.started" in replay.text
         assert "event: execution.completed" in replay.text
         assert f"id: {stored['last_seq']}" in replay.text
@@ -663,7 +668,7 @@ def test_web_execution_stream_replays_more_than_one_event_page(tmp_path):
 
 
 def test_web_execution_cancel_without_active_task_is_terminal_and_idempotent(tmp_path):
-    """失去运行任务的记录可被明确取消，重复取消不新增状态转换。"""
+    """尚未开始的排队记录可被明确取消，重复取消不新增状态转换。"""
     with TestClient(_make_app(tmp_path)) as client:
         repository = client.app.state.execution_repository
         repository.create(
