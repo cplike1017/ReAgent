@@ -6,6 +6,7 @@ const state = {
   agentMode: "react",
   streaming: false,
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
+  activeRun: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -13,8 +14,8 @@ const $$ = (sel) => document.querySelectorAll(sel);
 
 /* ================= 初始化 ================= */
 async function init() {
-  await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
-  setConnStatus(true);
+  const [capabilitiesLoaded] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
+  setConnStatus(Boolean(capabilitiesLoaded));
   bindEvents();
 }
 
@@ -44,8 +45,10 @@ async function loadCapabilities() {
       text: `${s.name} (${s.tool_count})`, title: `transport: ${s.transport}`,
     })));
     $("#mcp-count").textContent = mcp.count;
+    return true;
   } catch (e) {
     setConnStatus(false);
+    return false;
   }
 }
 
@@ -143,21 +146,30 @@ async function loadSessions() {
     (data.sessions || []).forEach((s) => {
       const li = document.createElement("li");
       li.className = "session-item";
+      li.tabIndex = 0;
+      li.setAttribute("role", "button");
       li.dataset.sessionId = s.session_id;
       li.innerHTML = `
         <span class="si-icon">💬</span>
         <span class="si-name">${esc(s.session_id.slice(-16))}</span>
         <span class="si-time">${esc((s.updated_at || "").slice(11, 19))}</span>
-        <span class="si-del" title="删除会话">✕</span>
+        <button type="button" class="si-del" title="删除会话" aria-label="删除会话">✕</button>
       `;
       if (state.sessionId === s.session_id) li.classList.add("active");
-      li.addEventListener("click", (e) => {
+      const activate = (e) => {
         if (e.target.classList.contains("si-del")) {
           e.stopPropagation();
           deleteSession(s.session_id);
           return;
         }
         openSession(s.session_id);
+      };
+      li.addEventListener("click", activate);
+      li.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openSession(s.session_id);
+        }
       });
       ul.appendChild(li);
     });
@@ -165,6 +177,10 @@ async function loadSessions() {
 }
 
 async function openSession(sessionId) {
+  if (state.streaming) {
+    setStatus("请先停止或等待当前执行完成。");
+    return;
+  }
   state.sessionId = sessionId;
   // 高亮
   $$("#session-list .session-item").forEach((el) => el.classList.toggle("active", el.dataset.sessionId === sessionId));
@@ -190,6 +206,8 @@ async function loadOrchestrations(sessionId) {
     (data.runs || []).forEach((run) => {
       const li = document.createElement("li");
       li.className = "orch-item";
+      li.tabIndex = 0;
+      li.setAttribute("role", "button");
       const icon = run.status === "SUCCEEDED" ? "✅" : run.status === "PARTIAL" ? "⚠️" : "❌";
       li.innerHTML = `
         <span class="si-icon">${icon}</span>
@@ -199,6 +217,12 @@ async function loadOrchestrations(sessionId) {
       li.title = `${run.task}\n状态: ${run.status} · 子 Agent: ${run.agent_count} · ${(run.duration_ms / 1000).toFixed(1)}s`;
       li.dataset.runId = run.run_id;
       li.addEventListener("click", () => openOrchestrationDetail(run.run_id));
+      li.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          openOrchestrationDetail(run.run_id);
+        }
+      });
       ul.appendChild(li);
     });
   } catch (e) { /* 忽略 */ }
@@ -222,6 +246,8 @@ function renderOrchestrationPanel(data) {
 
   const header = document.createElement("div");
   header.className = "workflow-header";
+  header.setAttribute("role", "button");
+  header.tabIndex = 0;
   const statusIcon = data.status === "SUCCEEDED" ? "✅" : data.status === "PARTIAL" ? "⚠️" : "❌";
   header.innerHTML = `
     <span class="wf-title">🌐 编排详情</span>
@@ -231,10 +257,7 @@ function renderOrchestrationPanel(data) {
   const body = document.createElement("div");
   body.className = "workflow-body";
   body.innerHTML = renderOrchestrationBody(data);
-  header.addEventListener("click", () => {
-    panel.classList.toggle("open");
-    header.querySelector(".wf-toggle").textContent = panel.classList.contains("open") ? "收起 ▴" : "展开 ▾";
-  });
+  bindWorkflowToggle(panel, header);
   panel.appendChild(header);
   panel.appendChild(body);
   // 插入到消息流顶部（最新编排）
@@ -252,14 +275,21 @@ function renderOrchestrationBody(data) {
   // 计划（分工）
   if (data.plan && data.plan.steps && data.plan.steps.length) {
     html += `<div class="orch-section"><div class="tl-title">分工计划 ${data.plan.rationale ? `（${esc(data.plan.rationale)}）` : ""}</div>`;
-    html += `<div class="plan-flow">`;
-    data.plan.steps.forEach((s, i) => {
-      const deps = s.depends_on && s.depends_on.length ? ` ⬅${s.depends_on.join(",")}` : "";
-      html += `<div class="pf-step ok">
-        <span class="pf-icon">👤</span>
-        <span class="pf-desc"><b>${esc(s.agent)}</b>${esc(deps)}</span>
-      </div>`;
-      if (i < data.plan.steps.length - 1) html += `<span class="pf-arrow">→</span>`;
+    html += `<div class="plan-flow plan-flow-layers">`;
+    const layers = buildPlanLayers(data.plan.steps);
+    layers.forEach((layer, layerIndex) => {
+      html += `<div class="pf-layer" aria-label="依赖层 ${layerIndex + 1}">`;
+      layer.forEach((item) => {
+        const result = data.agent_results && data.agent_results[item.index];
+        const status = orchestrationStatus(result?.status);
+        const deps = item.step.depends_on?.length ? `依赖步骤 ${item.step.depends_on.map((n) => n + 1).join("、")}` : "可并行";
+        html += `<div class="pf-step ${status.cls}" title="${esc(deps)}">
+          <span class="pf-icon">${status.icon}</span>
+          <span class="pf-desc"><b>${esc(item.step.agent)}</b><small>${esc(deps)}</small></span>
+        </div>`;
+      });
+      html += `</div>`;
+      if (layerIndex < layers.length - 1) html += `<div class="pf-layer-arrow" aria-label="后续依赖阶段">↓</div>`;
     });
     html += `</div></div>`;
   }
@@ -282,7 +312,7 @@ function renderOrchestrationBody(data) {
           <div class="sa-body">
             ${ar.error ? `<div class="ts-section"><div class="ts-label err-label">⚠️ 错误</div><pre class="ts-code err-code">${esc(ar.error)}</pre></div>` : ""}
             <div class="ts-section"><div class="ts-label">📤 回答</div>
-              <div class="md-body">${window.marked && typeof window.marked.parse === "function" ? window.marked.parse(ar.answer || "(无输出)") : esc(ar.answer || "(无输出)")}</div>
+              <div class="md-body">${renderMarkdown(ar.answer || "(无输出)")}</div>
             </div>
           </div>
         </div>`;
@@ -303,7 +333,7 @@ function renderOrchestrationBody(data) {
   // 最终答案
   if (data.final_answer) {
     html += `<div class="orch-section"><div class="tl-title">最终合成答案</div>`;
-    html += `<div class="md-body">${window.marked && typeof window.marked.parse === "function" ? window.marked.parse(data.final_answer) : esc(data.final_answer)}</div></div>`;
+    html += `<div class="md-body">${renderMarkdown(data.final_answer)}</div></div>`;
   }
 
   // Trace 树
@@ -317,17 +347,50 @@ function renderOrchestrationBody(data) {
   return html;
 }
 
+function orchestrationStatus(status) {
+  if (status === "SUCCEEDED") return { icon: "✓", cls: "ok" };
+  if (status === "FAILED") return { icon: "✕", cls: "fail" };
+  if (status === "SKIPPED") return { icon: "■", cls: "skip" };
+  return { icon: "◌", cls: "running" };
+}
+
+function buildPlanLayers(steps) {
+  const levels = new Map();
+  steps.forEach((step, index) => {
+    const dependencies = (step.depends_on || []).filter((dependency) => Number.isInteger(dependency) && dependency >= 0 && dependency < index);
+    levels.set(index, dependencies.length ? Math.max(...dependencies.map((dependency) => levels.get(dependency) || 0)) + 1 : 0);
+  });
+  return Array.from({ length: Math.max(...levels.values()) + 1 }, (_, level) =>
+    steps.map((step, index) => ({ step, index })).filter((item) => levels.get(item.index) === level)
+  );
+}
+
 function bindOrchestrationToggles(panel) {
   // 子 agent 卡片展开
   panel.querySelectorAll(".subagent-card").forEach((card) => {
-    card.querySelector(".sa-header").addEventListener("click", () => {
+    const header = card.querySelector(".sa-header");
+    header.setAttribute("role", "button");
+    header.tabIndex = 0;
+    const toggle = () => {
       card.classList.toggle("open");
-      card.querySelector(".ts-caret").textContent = card.classList.contains("open") ? "▴" : "▾";
+      const open = card.classList.contains("open");
+      card.querySelector(".ts-caret").textContent = open ? "▴" : "▾";
+      header.setAttribute("aria-expanded", String(open));
+    };
+    header.setAttribute("aria-expanded", "false");
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
     });
   });
   // 嵌套子编排：点击加载详情
   panel.querySelectorAll(".orch-child").forEach((el) => {
     el.addEventListener("click", () => openOrchestrationDetail(el.dataset.child));
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openOrchestrationDetail(el.dataset.child); }
+    });
   });
   // Trace 树折叠/详情
   bindTreeToggles(panel);
@@ -336,22 +399,68 @@ function bindOrchestrationToggles(panel) {
 
 function renderHistory(messages) {
   $("#messages").innerHTML = "";
+  const pendingToolCalls = new Map();
+  let historyRun = null;
   messages.forEach((m) => {
     if (m.role === "user") {
       addMessage("user", typeof m.content === "string" ? m.content : JSON.stringify(m.content));
     } else if (m.role === "assistant") {
-      // 带 tool_calls 的 assistant 消息 content 为 null，跳过（由后续 tool 消息体现）
       if (m.content === null || m.content === undefined || m.content === "") {
-        if (m.tool_calls && m.tool_calls.length) return; // 跳过决策消息
+        if (m.tool_calls && m.tool_calls.length) {
+          historyRun = addHistoryRunPanel(m.tool_calls.length);
+          m.tool_calls.forEach((call) => {
+            const id = call.id || call.tool_call_id;
+            const fn = call.function || call;
+            let argumentsValue = fn.arguments || call.arguments || {};
+            if (typeof argumentsValue === "string") {
+              try { argumentsValue = JSON.parse(argumentsValue); } catch (e) { argumentsValue = {}; }
+            }
+            if (id) pendingToolCalls.set(id, { id, name: fn.name || call.name || "tool", arguments: argumentsValue });
+          });
+        }
         return;
       }
       const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
       addMessage("assistant", content);
     } else if (m.role === "tool") {
-      addToolMsg({ tool: m.name || "tool", arguments: {}, success: true, data: contentPreview(m.content) });
+      const call = pendingToolCalls.get(m.tool_call_id) || {};
+      const envelope = parseToolEnvelope(m.content);
+      const card = {
+        tool_call_id: m.tool_call_id || call.id,
+        tool: m.name || call.name || "tool",
+        arguments: call.arguments || {},
+        success: envelope.success,
+        status: envelope.success === false ? "failed" : "succeeded",
+        error: envelope.error,
+      };
+      if (Object.prototype.hasOwnProperty.call(envelope, "data")) card.data = envelope.data;
+      addToolMsg(card, historyRun?.querySelector("[data-history-tools]") || undefined);
     }
   });
   scrollToBottom();
+}
+
+function addHistoryRunPanel(toolCount) {
+  const panel = document.createElement("section");
+  panel.className = "workflow history-workflow open";
+  panel.innerHTML = `
+    <div class="workflow-header" role="button" tabindex="0" aria-expanded="true">
+      <span class="wf-title">⌁ 历史执行</span>
+      <span class="wf-meta">${toolCount} 个工具调用 · Trace 未记录</span>
+      <span class="wf-toggle">收起 ▴</span>
+    </div>
+    <div class="workflow-body"><div class="run-summary">已根据保存的工具调用和结果还原；计划与 Trace 未记录。</div><div data-history-tools></div></div>`;
+  bindWorkflowToggle(panel, panel.querySelector(".workflow-header"));
+  $("#messages").appendChild(panel);
+  return panel;
+}
+
+function parseToolEnvelope(content) {
+  try {
+    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch (e) { /* retain raw content below */ }
+  return { success: true, data: content };
 }
 
 function contentPreview(s) {
@@ -364,6 +473,10 @@ function contentPreview(s) {
 }
 
 function newSession() {
+  if (state.streaming) {
+    setStatus("请先停止或等待当前执行完成。");
+    return;
+  }
   state.sessionId = null;
   $("#messages").innerHTML = `
     <div class="welcome">
@@ -389,74 +502,96 @@ function addMessage(role, content, meta) {
     div.appendChild(metaEl);
   }
   const contentEl = document.createElement("div");
-  if (role === "assistant" && window.marked && typeof window.marked.parse === "function") {
-    // Markdown 渲染
+  if (role === "assistant") {
     contentEl.className = "md-body";
-    contentEl.innerHTML = window.marked.parse(String(content || ""));
-    // 复制按钮（assistant 消息）
-    const actions = document.createElement("div");
-    actions.className = "msg-actions";
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-btn";
-    copyBtn.textContent = "复制";
-    copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(String(content || "")).then(() => {
-        copyBtn.textContent = "已复制 ✓";
-        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
-      });
-    });
-    actions.appendChild(copyBtn);
-    div.appendChild(actions);
+    contentEl.innerHTML = renderMarkdown(content);
   } else {
     contentEl.textContent = content;
   }
   div.appendChild(contentEl);
+  if (role === "assistant") ensureCopyButton(div, content);
   $("#messages").appendChild(div);
   scrollToBottom();
   return div;
 }
 
-function addToolMsg(data) {
-  // 流式中的工具调用卡片：点击可展开查看参数/输出/耗时
-  const div = document.createElement("div");
-  div.className = "msg tool ts-card";
-  div.dataset.toolCallId = data.tool_call_id || data.tool || "";
+function normalizeToolStatus(data) {
+  if (["queued", "running", "succeeded", "failed", "cancelled", "unknown"].includes(data.status)) {
+    return data.status;
+  }
+  if (data.success === false || data.error) return "failed";
+  if (Object.prototype.hasOwnProperty.call(data, "data")) return "succeeded";
+  return "queued";
+}
+
+function toolStatusMeta(status) {
+  return {
+    queued: { icon: "⏳", cls: "pending", label: "等待执行" },
+    running: { icon: "◌", cls: "running", label: "正在执行" },
+    succeeded: { icon: "✓", cls: "ok", label: "已完成" },
+    failed: { icon: "✕", cls: "err", label: "执行失败" },
+    cancelled: { icon: "■", cls: "cancelled", label: "已取消" },
+    unknown: { icon: "?", cls: "unknown", label: "状态未知" },
+  }[status] || { icon: "?", cls: "unknown", label: "状态未知" };
+}
+
+function jsonText(value, fallback) {
+  try { return JSON.stringify(value === undefined ? fallback : value, null, 2); } catch (e) { return String(value); }
+}
+
+function hasToolOutput(data) {
+  return Object.prototype.hasOwnProperty.call(data, "data") && data.data !== undefined;
+}
+
+function renderToolCard(div, update) {
+  const data = { ...(div._toolData || {}), ...update };
+  data.status = normalizeToolStatus(data);
+  div._toolData = data;
+  div.dataset.toolCallId = data.tool_call_id || div.dataset.toolCallId || "";
+  div.dataset.runId = data.run_id || div.dataset.runId || "";
+  div.dataset.status = data.status;
+  const status = toolStatusMeta(data.status);
   const dur = data.duration_ms != null ? ` · ⏱ ${formatMs(data.duration_ms)}` : "";
-  const statusIcon = data.success === false ? "❌" : "✅";
+  const hasOutput = hasToolOutput(data);
+  const output = hasOutput
+    ? `<div class="ts-section"><div class="ts-label">📤 输出${data.truncated ? "（已截断）" : ""}</div>${toolOutputHtml(data.tool, data.data)}</div>`
+    : "";
+  const error = data.error
+    ? `<div class="ts-section"><div class="ts-label err-label">⚠️ 错误</div><pre class="ts-code err-code">${esc(data.error.message || jsonText(data.error, {}))}</pre></div>`
+    : "";
+  const pending = !hasOutput && !data.error && ["queued", "running"].includes(data.status)
+    ? `<div class="ts-section"><div class="ts-label">${data.status === "running" ? "◌ 正在执行..." : "⏳ 等待执行..."}</div></div>`
+    : "";
+
   div.innerHTML = `
-    <div class="ts-header">
+    <button type="button" class="ts-header" aria-expanded="false">
       <span class="ts-icon">${data.tool === "delegate" ? "🌐" : "🛠"}</span>
-      <span class="ts-name">${esc(data.tool)}</span>
-      <span class="ts-status ${data.success === false ? "err" : "ok"}">${statusIcon}</span>
+      <span class="ts-name">${esc(data.tool || "tool")}</span>
+      <span class="ts-status ${status.cls}" title="${status.label}">${status.icon}</span>
       <span class="ts-dur">${dur}</span>
-      <span class="ts-args-preview">${esc(JSON.stringify(data.arguments || {}).slice(0, 50))}</span>
+      <span class="ts-args-preview">${esc(jsonText(data.arguments, {}).slice(0, 50))}</span>
       <span class="ts-caret">▾</span>
-    </div>
+    </button>
     <div class="ts-body">
-      <div class="ts-section">
-        <div class="ts-label">📋 参数</div>
-        <pre class="ts-code">${esc(JSON.stringify(data.arguments || {}, null, 2))}</pre>
-      </div>
-      ${data.data && data.data !== "等待执行..." ? `
-      <div class="ts-section">
-        <div class="ts-label">📤 输出</div>
-        ${toolOutputHtml(data.tool, data.data)}
-      </div>` : `<div class="ts-section"><div class="ts-label">⏳ 等待执行...</div></div>`}
-      ${data.error ? `
-      <div class="ts-section">
-        <div class="ts-label err-label">⚠️ 错误</div>
-        <pre class="ts-code err-code">${esc(data.error.message || JSON.stringify(data.error))}</pre>
-      </div>` : ""}
-    </div>
-  `;
-  // 点击展开
+      <div class="ts-section"><div class="ts-label">📋 参数</div><pre class="ts-code">${esc(jsonText(data.arguments, {}))}</pre></div>
+      ${output || pending || `<div class="ts-section"><div class="ts-label">${status.label}</div></div>`}
+      ${error}
+      ${data.duration_ms != null ? `<div class="ts-meta">⏱ 耗时: ${formatMs(data.duration_ms)}</div>` : ""}
+    </div>`;
   div.querySelector(".ts-header").addEventListener("click", () => {
     div.classList.toggle("open");
-    const caret = div.querySelector(".ts-caret");
-    caret.textContent = div.classList.contains("open") ? "▴" : "▾";
+    const open = div.classList.contains("open");
+    div.querySelector(".ts-header").setAttribute("aria-expanded", String(open));
+    div.querySelector(".ts-caret").textContent = open ? "▴" : "▾";
   });
-  $("#messages").appendChild(div);
-  scrollToBottom();
+}
+
+function addToolMsg(data, parent) {
+  const div = document.createElement("div");
+  div.className = "msg tool ts-card";
+  renderToolCard(div, data);
+  (parent || $("#messages")).appendChild(div);
+  if (!parent) scrollToBottom();
   return div;
 }
 
@@ -502,42 +637,13 @@ function parseDelegateOutput(raw) {
   }
 }
 
-// 按工具名找到最近一张卡片（流式结果回填）
-function updateToolCard(name, data) {
-  const cards = $$("#messages .ts-card[data-tool-call-id]");
-  for (let i = cards.length - 1; i >= 0; i--) {
-    const card = cards[i];
-    if (card.dataset.toolCallId === name || (card.dataset.toolCallId === "" && card.querySelector(".ts-name").textContent === name)) {
-      // 更新状态和输出
-      const statusEl = card.querySelector(".ts-status");
-      statusEl.textContent = data.success === false ? "❌" : "✅";
-      statusEl.className = "ts-status " + (data.success === false ? "err" : "ok");
-      if (data.duration_ms != null) {
-        const durEl = card.querySelector(".ts-dur");
-        durEl.textContent = " · ⏱ " + formatMs(data.duration_ms);
-      }
-      const body = card.querySelector(".ts-body");
-      if (data.data && data.data !== "等待执行...") {
-        body.innerHTML = `
-          <div class="ts-section">
-            <div class="ts-label">📋 参数</div>
-            <pre class="ts-code">${esc(JSON.stringify(data.arguments || {}, null, 2))}</pre>
-          </div>
-          <div class="ts-section">
-            <div class="ts-label">📤 输出</div>
-            ${toolOutputHtml(data.tool, data.data)}
-          </div>
-          ${data.error ? `
-          <div class="ts-section">
-            <div class="ts-label err-label">⚠️ 错误</div>
-            <pre class="ts-code err-code">${esc(data.error.message || JSON.stringify(data.error))}</pre>
-          </div>` : ""}
-        `;
-      }
-      return true;
-    }
-  }
-  return false;
+function updateToolCard(toolCallId, data, scope) {
+  if (!toolCallId) return false;
+  const cards = Array.from((scope || document).querySelectorAll(".ts-card[data-tool-call-id]"));
+  const card = cards.find((item) => item.dataset.toolCallId === toolCallId);
+  if (!card) return false;
+  renderToolCard(card, { ...data, tool_call_id: toolCallId });
+  return true;
 }
 
 function addErrorMsg(message) {
@@ -564,6 +670,40 @@ function esc(s) {
     .replace(/'/g, "&#39;");
 }
 
+const SAFE_MARKDOWN_TAGS = new Set([
+  "A", "BLOCKQUOTE", "BR", "CODE", "DEL", "EM", "H1", "H2", "H3", "H4", "H5", "H6",
+  "HR", "LI", "OL", "P", "PRE", "STRONG", "TABLE", "TBODY", "TD", "TH", "THEAD", "TR", "UL",
+]);
+
+function renderMarkdown(content) {
+  const source = String(content == null ? "" : content);
+  if (!window.marked || typeof window.marked.parse !== "function") return esc(source);
+
+  const template = document.createElement("template");
+  template.innerHTML = window.marked.parse(source);
+  template.content.querySelectorAll("*").forEach((node) => {
+    if (!SAFE_MARKDOWN_TAGS.has(node.tagName)) {
+      node.replaceWith(document.createTextNode(node.textContent || ""));
+      return;
+    }
+    Array.from(node.attributes).forEach((attr) => {
+      if (node.tagName === "A" && attr.name.toLowerCase() === "href") {
+        try {
+          const url = new URL(attr.value, window.location.origin);
+          if (["http:", "https:", "mailto:"].includes(url.protocol)) {
+            node.setAttribute("href", url.href);
+            node.setAttribute("target", "_blank");
+            node.setAttribute("rel", "noopener noreferrer");
+            return;
+          }
+        } catch (e) { /* remove invalid links below */ }
+      }
+      node.removeAttribute(attr.name);
+    });
+  });
+  return template.innerHTML;
+}
+
 /* ================= 工作流面板（Trace 树 v2） ================= */
 const SPAN_ICONS = {
   gateway: "🚪", worker: "⚙️", agent: "🧠", llm: "💬", tool: "🛠",
@@ -579,6 +719,8 @@ function addWorkflowPanel(data, opts) {
   // Header
   const header = document.createElement("div");
   header.className = "workflow-header";
+  header.setAttribute("role", "button");
+  header.tabIndex = 0;
   const planInfo = data.plan && data.plan.length
     ? ` · 计划 ${data.plan.length} 步${data.plan_revisions ? ` · 重规划 ${data.plan_revisions}` : ""}`
     : "";
@@ -592,10 +734,7 @@ function addWorkflowPanel(data, opts) {
   const body = document.createElement("div");
   body.className = "workflow-body";
   body.innerHTML = renderWorkflowBody(data);
-  header.addEventListener("click", () => {
-    panel.classList.toggle("open");
-    header.querySelector(".wf-toggle").textContent = panel.classList.contains("open") ? "收起 ▴" : "展开 ▾";
-  });
+  bindWorkflowToggle(panel, header);
   panel.appendChild(header);
   panel.appendChild(body);
   $("#messages").appendChild(panel);
@@ -607,13 +746,109 @@ function addWorkflowPanel(data, opts) {
   return panel;
 }
 
+function bindWorkflowToggle(panel, header) {
+  const toggle = () => {
+    panel.classList.toggle("open");
+    const open = panel.classList.contains("open");
+    header.querySelector(".wf-toggle").textContent = open ? "收起 ▴" : "展开 ▾";
+    header.setAttribute("aria-expanded", String(open));
+  };
+  header.setAttribute("aria-expanded", String(panel.classList.contains("open")));
+  header.addEventListener("click", toggle);
+  header.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      toggle();
+    }
+  });
+}
+
+function startLiveRun(run, data) {
+  if (run.panel) return run.panel;
+  const panel = document.createElement("section");
+  panel.className = "workflow live-workflow open";
+  panel.id = "wf-live-" + (data.run_id || Date.now());
+  panel.dataset.runId = data.run_id || "";
+  panel.innerHTML = `
+    <div class="workflow-header" role="button" tabindex="0" aria-expanded="true">
+      <span class="wf-title">◌ 本次执行</span>
+      <span class="wf-meta">${esc(data.mode || state.agentMode)} · <span data-run-status>正在连接...</span></span>
+      <span class="wf-toggle">收起 ▴</span>
+    </div>
+    <div class="workflow-body live-workflow-body">
+      <div class="run-summary" data-run-summary>正在建立执行通道…</div>
+      <div class="live-tool-list" data-live-tools></div>
+    </div>`;
+  bindWorkflowToggle(panel, panel.querySelector(".workflow-header"));
+  const messages = $("#messages");
+  messages.insertBefore(panel, run.assistantEl);
+  run.panel = panel;
+  run.toolResults = new Map();
+  scrollToBottom();
+  return panel;
+}
+
+function updateLiveRun(run, data, summary) {
+  if (!run) return;
+  const panel = startLiveRun(run, data);
+  if (data.run_id) {
+    run.runId = data.run_id;
+    panel.dataset.runId = data.run_id;
+  }
+  const status = panel.querySelector("[data-run-status]");
+  if (status) status.textContent = data.status === "running" ? "正在执行" : (data.status || "正在执行");
+  const summaryEl = panel.querySelector("[data-run-summary]");
+  if (summaryEl && summary) summaryEl.textContent = summary;
+}
+
+function finalizeRun(run, status, message, finalData) {
+  if (!run) return;
+  run.assistantEl?.classList.remove("streaming");
+  const panel = run.panel;
+  if (!panel) return;
+
+  if (finalData) {
+    const toolCalls = (finalData.tool_calls || []).map((call) => ({
+      ...call,
+      ...(run.toolResults?.get(call.tool_call_id || call.id) || {}),
+    }));
+    panel.className = "workflow open";
+    panel.id = "wf-" + (finalData.trace_id || run.runId || Date.now());
+    panel.innerHTML = `
+      <div class="workflow-header" role="button" tabindex="0" aria-expanded="true">
+        <span class="wf-title">🔍 本次执行</span>
+        <span class="wf-meta">${finalData.trace_id ? esc(finalData.trace_id.slice(-12)) : ""} · 已完成</span>
+        <span class="wf-toggle">收起 ▴</span>
+      </div>
+      <div class="workflow-body">${renderWorkflowBody({ ...finalData, tool_calls: toolCalls })}</div>`;
+    bindWorkflowToggle(panel, panel.querySelector(".workflow-header"));
+    bindTreeToggles(panel);
+    bindToolStepToggles(panel);
+    return;
+  }
+
+  panel.classList.toggle("failed", status === "failed");
+  const statusEl = panel.querySelector("[data-run-status]");
+  if (statusEl) statusEl.textContent = status === "cancelled" ? "已停止" : "执行失败";
+  const summaryEl = panel.querySelector("[data-run-summary]");
+  if (summaryEl) summaryEl.textContent = message || (status === "cancelled" ? "已停止接收本次执行结果。" : "本次执行未能完成。");
+  const incomplete = status === "cancelled" ? "cancelled" : "unknown";
+  panel.querySelectorAll(".ts-card").forEach((card) => {
+    if (["queued", "running"].includes(card.dataset.status)) {
+      renderToolCard(card, { status: incomplete, error: status === "failed" ? { message: message || "执行中断" } : null });
+    }
+  });
+}
+
 function bindToolStepToggles(panel) {
   panel.querySelectorAll(".ts-card").forEach((card) => {
     const header = card.querySelector(".ts-header");
     header.addEventListener("click", () => {
       card.classList.toggle("open");
+      const open = card.classList.contains("open");
+      header.setAttribute("aria-expanded", String(open));
       const caret = card.querySelector(".ts-caret");
-      caret.textContent = card.classList.contains("open") ? "▴" : "▾";
+      caret.textContent = open ? "▴" : "▾";
     });
   });
 }
@@ -662,28 +897,30 @@ function renderWorkflowBody(data) {
 
 function renderToolStepCard(tc, index) {
   const dur = tc.duration_ms != null ? formatMs(tc.duration_ms) : "";
-  const statusIcon = tc.status === "ERROR" ? "❌" : tc.error ? "❌" : "✅";
-  const statusCls = tc.status === "ERROR" || tc.error ? "err" : "ok";
-  const argsPreview = JSON.stringify(tc.arguments || {}).slice(0, 60);
-  const dataStr = tc.data ? String(tc.data).slice(0, 120) : "";
+  const status = toolStatusMeta(normalizeToolStatus({
+    ...tc,
+    status: tc.status === "ERROR" ? "failed" : tc.status,
+  }));
+  const argsPreview = jsonText(tc.arguments, {}).slice(0, 60);
+  const dataStr = hasToolOutput(tc) ? jsonText(tc.data, null).slice(0, 120) : "";
   const errStr = tc.error ? (tc.error.message || JSON.stringify(tc.error)).slice(0, 120) : "";
   return `
     <div class="ts-card" data-index="${index}">
-      <div class="ts-header">
+      <button type="button" class="ts-header" aria-expanded="false">
         <span class="ts-num">${index + 1}</span>
         <span class="ts-icon">🛠</span>
         <span class="ts-name">${esc(tc.name)}</span>
-        <span class="ts-status ${statusCls}">${statusIcon}</span>
+        <span class="ts-status ${status.cls}" title="${status.label}">${status.icon}</span>
         ${dur ? `<span class="ts-dur">⏱ ${dur}</span>` : ""}
         <span class="ts-args-preview">${esc(argsPreview)}</span>
         <span class="ts-caret">▾</span>
-      </div>
+      </button>
       <div class="ts-body">
         <div class="ts-section">
           <div class="ts-label">📋 参数</div>
           <pre class="ts-code">${esc(JSON.stringify(tc.arguments || {}, null, 2))}</pre>
         </div>
-        ${dataStr ? `
+        ${hasToolOutput(tc) ? `
         <div class="ts-section">
           <div class="ts-label">📤 输出</div>
           <pre class="ts-code">${esc(dataStr)}${String(tc.data).length > 120 ? "\n..." : ""}</pre>
@@ -717,10 +954,10 @@ function renderTraceNodeV2(span, depth, totalDur) {
     || (span.attributes && Object.keys(span.attributes).length);
 
   let html = `<div class="trace-node">`;
-  // 行（点击展开详情；caret 折叠子节点）
-  html += `<div class="tn-row ${isErr ? "is-err" : ""} ${hasDetails ? "clickable" : ""}" style="padding-left:${depth * 14}px">`;
+  // 行：子树和详情分别由可键盘操作的按钮控制。
+  html += `<div class="tn-row ${isErr ? "is-err" : ""}" style="padding-left:${depth * 14}px">`;
   html += hasChildren
-    ? `<span class="tn-caret open" data-caret>▾</span>`
+    ? `<button type="button" class="tn-caret open" data-caret aria-label="折叠子步骤" aria-expanded="true">▾</button>`
     : `<span class="tn-caret-placeholder"></span>`;
   html += `<span class="tn-icon">${icon}</span>`;
   html += `<span class="tn-name">${esc(span.name)}</span>`;
@@ -731,7 +968,7 @@ function renderTraceNodeV2(span, depth, totalDur) {
   html += `<span class="tn-dur">${dur.toFixed(dur >= 100 ? 0 : 1)}ms</span>`;
   html += `<span class="tn-status ${cls}">${isErr ? "❌" : "✓"}</span>`;
   // 详情展开指示（有详情才显示）
-  html += hasDetails ? `<span class="tn-expand" data-expand>详情 ▾</span>` : "";
+  html += hasDetails ? `<button type="button" class="tn-expand" data-expand aria-expanded="false">详情 ▾</button>` : "";
   html += `</div>`;
 
   // 详情面板（点击行展开）
@@ -793,26 +1030,26 @@ function bindTreeToggles(panel) {
   panel.querySelectorAll("[data-caret]").forEach((caret) => {
     caret.addEventListener("click", (e) => {
       e.stopPropagation();
-      const row = caret.closest(".tn-row");
-      const children = row.nextElementSibling && row.nextElementSibling.classList.contains("tn-children")
-        ? row.nextElementSibling : null;
+      const node = caret.closest(".trace-node");
+      const children = node?.querySelector(":scope > .tn-children");
       if (!children) return;
       const open = caret.classList.contains("open");
       caret.classList.toggle("open", !open);
       children.style.display = open ? "none" : "";
+      caret.setAttribute("aria-expanded", String(!open));
+      caret.setAttribute("aria-label", open ? "展开子步骤" : "折叠子步骤");
     });
   });
-  // 行点击：展开/收起详情面板
-  panel.querySelectorAll(".tn-row.clickable").forEach((row) => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("[data-caret]")) return; // caret 已处理
-      const detail = row.nextElementSibling && row.nextElementSibling.classList.contains("tn-detail")
-        ? row.nextElementSibling : null;
+  panel.querySelectorAll("[data-expand]").forEach((expand) => {
+    expand.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const node = expand.closest(".trace-node");
+      const detail = node?.querySelector(":scope > .tn-detail");
       if (!detail) return;
-      const expand = row.querySelector("[data-expand]");
       const isOpen = detail.classList.contains("open");
       detail.classList.toggle("open", !isOpen);
-      if (expand) expand.textContent = isOpen ? "详情 ▾" : "详情 ▴";
+      expand.textContent = isOpen ? "详情 ▾" : "详情 ▴";
+      expand.setAttribute("aria-expanded", String(!isOpen));
     });
   });
 }
@@ -823,15 +1060,16 @@ async function send() {
   const message = input.value.trim();
   if (!message || state.streaming) return;
 
+  $("#messages .welcome")?.remove();
   addMessage("user", message);
   input.value = "";
   setStreaming(true);
 
   const assistantEl = addMessage("assistant", "");
   assistantEl.classList.add("streaming");
-  const contentEl = assistantEl.querySelector("div:last-child");
-  contentEl.className = "md-body";
-  contentEl.textContent = "";
+  const activeRun = { assistantEl, contentEl: assistantEl.querySelector(".md-body"), panel: null, runId: null, toolResults: new Map() };
+  state.activeRun = activeRun;
+  startLiveRun(activeRun, { mode: state.agentMode, status: "connecting" });
 
   // 停止按钮
   state.abortCtrl = new AbortController();
@@ -844,11 +1082,15 @@ async function send() {
       body: JSON.stringify({ message, session_id: state.sessionId, agent_mode: state.agentMode }),
       signal: state.abortCtrl.signal,
     });
+    if (!resp.ok) throw new Error(await responseError(resp));
+    const contentType = resp.headers.get("content-type") || "";
+    if (!contentType.includes("text/event-stream")) throw new Error("服务没有返回执行事件流。");
+    if (!resp.body) throw new Error("服务未返回可读取的执行事件流。");
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let finalAnswer = "";
     let finalData = null;
+    let streamError = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -858,57 +1100,76 @@ async function send() {
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const frame = buffer.slice(0, idx);
         buffer = buffer.slice(idx + 2);
-        handleFrame(frame, contentEl, (ans, data) => { finalAnswer = ans; finalData = data; });
+        handleFrame(frame, activeRun, (data) => { finalData = data; }, (error) => { streamError = error; });
+        if (streamError) throw streamError;
       }
     }
-    if (finalAnswer) {
-      contentEl.innerHTML = (window.marked && typeof window.marked.parse === "function")
-        ? window.marked.parse(finalAnswer) : esc(finalAnswer);
-      // 补复制按钮
-      ensureCopyButton(assistantEl, finalAnswer);
-    }
-    assistantEl.classList.remove("streaming");
-    if (finalData) {
-      state.sessionId = finalData.session_id;
-      addWorkflowPanel({
-        trace: finalData.trace, trace_id: finalData.trace_id,
-        plan: finalData.plan, plan_revisions: finalData.plan_revisions,
-        tool_calls: finalData.tool_calls,
-      });
-    }
+    if (buffer.trim()) handleFrame(buffer, activeRun, (data) => { finalData = data; }, (error) => { streamError = error; });
+    if (streamError) throw streamError;
+    if (!finalData) throw new Error("执行连接意外结束，未收到完成状态。");
+    state.sessionId = finalData.session_id;
+    setAssistantContent(assistantEl, finalData.answer || activeRun.finalAnswer || "");
+    finalizeRun(activeRun, "succeeded", "", finalData);
   } catch (e) {
     if (e.name === "AbortError") {
-      contentEl.textContent = "⏹ 已停止生成。";
+      setAssistantContent(assistantEl, "⏹ 已停止生成。", false);
+      finalizeRun(activeRun, "cancelled", "已停止接收本次执行结果。");
     } else {
-      assistantEl.classList.remove("streaming");
-      contentEl.textContent = "⚠️ 请求失败: " + e.message;
+      setAssistantContent(assistantEl, "⚠️ 请求失败: " + e.message, false);
+      finalizeRun(activeRun, "failed", e.message);
     }
+  } finally {
+    $("#stop").style.display = "none";
+    setStreaming(false);
+    state.activeRun = null;
+    loadSessions();
+    // 编排记录可能新增（delegate 工具）
+    if (state.sessionId) loadOrchestrations(state.sessionId);
   }
-  $("#stop").style.display = "none";
-  setStreaming(false);
-  loadSessions();
-  // 编排记录可能新增（delegate 工具）
-  if (state.sessionId) loadOrchestrations(state.sessionId);
+}
+
+async function responseError(resp) {
+  const payload = await resp.json().catch(() => null);
+  const detail = payload?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail?.message) return detail.message;
+  return `服务响应 HTTP ${resp.status}`;
+}
+
+function setAssistantContent(assistantEl, content, copyable = true) {
+  const text = String(content == null ? "" : content);
+  const contentEl = assistantEl.querySelector(".md-body");
+  if (contentEl) contentEl.innerHTML = renderMarkdown(text);
+  ensureCopyButton(assistantEl, copyable ? text : "");
 }
 
 function ensureCopyButton(assistantEl, content) {
-  if (assistantEl.querySelector(".copy-btn")) return;
-  const actions = document.createElement("div");
-  actions.className = "msg-actions";
-  const copyBtn = document.createElement("button");
-  copyBtn.className = "copy-btn";
-  copyBtn.textContent = "复制";
-  copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(content).then(() => {
-      copyBtn.textContent = "已复制 ✓";
-      setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+  assistantEl.dataset.copyText = String(content || "");
+  let copyBtn = assistantEl.querySelector(".copy-btn");
+  if (!copyBtn) {
+    const actions = document.createElement("div");
+    actions.className = "msg-actions";
+    copyBtn = document.createElement("button");
+    copyBtn.className = "copy-btn";
+    copyBtn.type = "button";
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(assistantEl.dataset.copyText || "");
+        copyBtn.textContent = "已复制 ✓";
+        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+      } catch (e) {
+        copyBtn.textContent = "复制失败";
+        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+      }
     });
-  });
-  actions.appendChild(copyBtn);
-  assistantEl.appendChild(actions);
+    actions.appendChild(copyBtn);
+    assistantEl.appendChild(actions);
+  }
+  copyBtn.textContent = "复制";
+  copyBtn.disabled = !assistantEl.dataset.copyText;
 }
 
-function handleFrame(frame, contentEl, onComplete) {
+function handleFrame(frame, run, onComplete, onError) {
   const lines = frame.split("\n");
   const eventLine = lines.find((l) => l.startsWith("event:"));
   const dataLine = lines.find((l) => l.startsWith("data:"));
@@ -918,28 +1179,41 @@ function handleFrame(frame, contentEl, onComplete) {
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
   switch (event) {
+    case "run_started":
+      updateLiveRun(run, data, "正在等待 Agent 的第一项决策…");
+      break;
     case "step":
+      updateLiveRun(run, data, data.tool_calls?.length
+        ? `第 ${data.step} 步：准备调用 ${data.tool_calls.map((call) => call.name).join("、")}`
+        : `第 ${data.step} 步：正在整理最终回答…`);
       if (data.tool_calls && data.tool_calls.length) {
         data.tool_calls.forEach((tc) => {
-          addToolMsg({ tool: tc.name, arguments: tc.arguments, success: true, data: "等待执行..." });
+          addToolMsg({
+            run_id: data.run_id,
+            tool_call_id: tc.tool_call_id || tc.id,
+            tool: tc.name,
+            arguments: tc.arguments,
+            status: tc.status || "queued",
+          }, run.panel?.querySelector("[data-live-tools]"));
         });
       }
       break;
     case "tool_result":
-      // 回填对应的卡片（按工具名匹配最近的未完成卡片）
-      if (!updateToolCard(data.tool, data)) {
-        addToolMsg(data); // 找不到则新增
+      run.toolResults?.set(data.tool_call_id, data);
+      updateLiveRun(run, data, `第 ${data.step} 步：${data.tool} ${data.status === "succeeded" ? "已完成" : "未完成"}`);
+      if (!updateToolCard(data.tool_call_id, data, run.panel)) {
+        addToolMsg(data, run.panel?.querySelector("[data-live-tools]"));
       }
       break;
     case "final":
-      contentEl.innerHTML = (window.marked && typeof window.marked.parse === "function")
-        ? window.marked.parse(data.content || "") : esc(data.content || "");
+      run.finalAnswer = data.content || "";
+      setAssistantContent(run.assistantEl, run.finalAnswer);
       break;
     case "done":
-      onComplete(data.answer || "", data);
+      onComplete(data);
       break;
     case "error":
-      addErrorMsg(data.message);
+      onError(new Error(data.message || "执行失败"));
       break;
   }
 }
@@ -952,9 +1226,19 @@ function setStreaming(v) {
 
 function stopStreaming() {
   if (state.abortCtrl) {
+    updateLiveRun(state.activeRun, { status: "running" }, "正在停止本次执行…");
     state.abortCtrl.abort();
     $("#stop").style.display = "none";
   }
+}
+
+function setSidebarOpen(open) {
+  const sidebar = $("#sidebar");
+  const toggle = $("#sidebar-toggle");
+  if (!sidebar || !toggle) return;
+  sidebar.classList.toggle("is-open", open);
+  document.body.classList.toggle("sidebar-open", open);
+  toggle.setAttribute("aria-expanded", String(open));
 }
 
 /* ================= 事件绑定 ================= */
@@ -965,17 +1249,27 @@ function bindEvents() {
   const stopBtn = $("#stop");
   const uploadBtn = $("#upload-btn");
   const fileInput = $("#file-input");
+  const sidebarToggle = $("#sidebar-toggle");
+  const sidebarScrim = $("#sidebar-scrim");
 
   sendBtn.addEventListener("click", send);
   if (stopBtn) stopBtn.addEventListener("click", stopStreaming);
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   });
   input.addEventListener("input", () => {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
   });
   if (newBtn) newBtn.addEventListener("click", newSession);
+  if (sidebarToggle) sidebarToggle.addEventListener("click", () => setSidebarOpen(!$("#sidebar")?.classList.contains("is-open")));
+  if (sidebarScrim) sidebarScrim.addEventListener("click", () => setSidebarOpen(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $("#sidebar")?.classList.contains("is-open")) {
+      setSidebarOpen(false);
+      sidebarToggle?.focus();
+    }
+  });
 
   // 上传文件
   if (uploadBtn && fileInput) {
@@ -999,10 +1293,14 @@ function bindEvents() {
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (state.streaming) {
+        setStatus("请在当前执行结束后切换模式。");
+        return;
+      }
       document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
       state.agentMode = btn.dataset.mode;
-      $("#mode-badge").textContent = btn.dataset.mode;
+      $("#mode-badge").textContent = btn.dataset.mode === "react" ? "ReAct" : "Plan";
     });
   });
 

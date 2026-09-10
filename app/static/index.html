@@ -4,21 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent Web UI</title>
-<link rel="stylesheet" href="/style.css?v=4">
+<link rel="stylesheet" href="/style.css?v=5">
 </head>
 <body>
 <div class="layout">
   <!-- 侧边栏 -->
-  <aside class="sidebar">
+  <aside class="sidebar" id="sidebar">
     <div class="brand">
       <h1>ReAgent</h1>
-      <span class="badge" id="mode-badge">react</span>
+      <span class="badge" id="mode-badge">ReAct</span>
     </div>
 
     <div class="panel">
       <h3>执行模式</h3>
       <div class="mode-switch">
-        <button class="mode-btn active" data-mode="react">React</button>
+        <button class="mode-btn active" data-mode="react">ReAct</button>
         <button class="mode-btn" data-mode="plan">Plan</button>
       </div>
     </div>
@@ -70,32 +70,34 @@
       <ul class="cap-list" id="orch-list"></ul>
     </div>
   </aside>
+  <div class="sidebar-scrim" id="sidebar-scrim" aria-hidden="true"></div>
 
   <!-- 主区 -->
   <main class="main">
     <header class="chat-header">
+      <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false">☰ 菜单</button>
       <span id="conn-status" class="status-dot"></span>
       <span id="conn-text">连接中...</span>
-      <span class="chat-status" id="chat-status"></span>
+      <span class="chat-status" id="chat-status" aria-live="polite"></span>
     </header>
 
     <div class="messages" id="messages">
       <div class="welcome">
         <h2>🤖 ReAgent</h2>
         <p>ReAct / Plan 双模式 · 记忆 · MCP · 技能 · 多 Agent 编排</p>
-        <p class="sub">工作流完全透明：每步决策、工具调用、耗时、Trace 树实时可见</p>
+        <p class="sub">发送后逐步展示 Agent 状态、工具调用与完成后的 Trace</p>
       </div>
     </div>
 
     <div class="composer">
       <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行" rows="1"></textarea>
-      <button id="stop" class="stop-btn" style="display:none" title="停止生成">■</button>
+      <button id="stop" class="stop-btn" type="button" style="display:none" title="停止生成" aria-label="停止生成">■</button>
       <button id="send" class="send-btn">发送</button>
     </div>
   </main>
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=4"></script>
+<script src="/app.js?v=5"></script>
 </body>
 </html>

@@ -4,6 +4,8 @@ Stage 12 测试：Web UI（进程内直连 + SSE 流式）。
 覆盖：首页静态资源、工具/技能/MCP 列表、同步聊天、SSE 流式事件、会话历史。
 使用 fakeredis + stub LLM + test 环境（跳过 MCP 连接），完全离线。
 """
+import json
+
 import fakeredis.aioredis
 from fastapi.testclient import TestClient
 
@@ -124,6 +126,63 @@ def test_web_chat_stream_sse(tmp_path):
             assert "event: step" in body
             assert "event: tool_result" in body
             assert "event: done" in body
+
+
+def _sse_events(body: str) -> list[tuple[str, dict]]:
+    """Parse the small SSE frames returned by the in-process Web API."""
+    events = []
+    for frame in body.strip().split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in frame.splitlines() if ": " in line)
+        if "event" in lines and "data" in lines:
+            events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+def test_web_chat_stream_identifies_each_tool_call_and_run_lifecycle(tmp_path):
+    """The browser can reconcile a live tool card only with a stable call/run identity."""
+    with TestClient(_make_app(tmp_path)) as client:
+        with client.stream(
+            "POST", "/api/web/chat/stream",
+            json={"message": "计算 123 * 456", "agent_mode": "react"},
+        ) as resp:
+            assert resp.status_code == 200
+            events = _sse_events("".join(resp.iter_text()))
+
+    names = [name for name, _ in events]
+    assert names[0] == "run_started"
+    assert names[-1] == "done"
+    assert {"step", "tool_result", "final", "done"} <= set(names)
+
+    run_ids = {payload["run_id"] for _, payload in events}
+    assert len(run_ids) == 1
+    assert all(payload["event_id"] and isinstance(payload["seq"], int) for _, payload in events)
+
+    step = next(payload for name, payload in events if name == "step" and payload["tool_calls"])
+    tool_call = step["tool_calls"][0]
+    result = next(payload for name, payload in events if name == "tool_result")
+    assert tool_call["id"]
+    assert result["tool_call_id"] == tool_call["id"]
+    assert result["status"] == "succeeded"
+
+
+def test_web_static_assets_declare_safe_live_run_contract(tmp_path):
+    """Keep the safety and lifecycle entry points from regressing into ad-hoc DOM updates."""
+    with TestClient(_make_app(tmp_path)) as client:
+        app_js = client.get("/app.js").text
+        index = client.get("/").text
+        css = client.get("/style.css").text
+
+    assert "function renderMarkdown" in app_js
+    assert app_js.count("window.marked.parse(") == 1
+    assert "function finalizeRun" in app_js
+    assert "isComposing" in app_js
+    assert 'event.key === "Escape"' in app_js
+    assert 'li.tabIndex = 0' in app_js
+    assert 'li.setAttribute("role", "button")' in app_js
+    assert 'aria-label="停止生成"' in index
+    assert 'id="sidebar-toggle"' in index
+    assert "--canvas: #F5FAF8" in css
+    assert "@media (max-width: 767px)" in css
 
 
 def test_web_sessions(tmp_path):

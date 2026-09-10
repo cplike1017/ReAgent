@@ -13,7 +13,9 @@ Web UI 路由（Stage 12）。
 """
 import asyncio
 import json
+import time
 from typing import AsyncIterator
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -95,7 +97,10 @@ def _build_trace_tree(request: Request, trace_id: str | None) -> dict | None:
 
 def _tool_calls_with_duration(result, trace_tree: dict | None) -> list[dict]:
     """把工具调用列表与 Trace 中的耗时关联（按顺序配对 tool.execute span）。"""
-    calls = [{"name": tc.name, "arguments": tc.arguments} for tc in result.tool_calls]
+    calls = [
+        {"id": tc.id, "tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments}
+        for tc in result.tool_calls
+    ]
     if not trace_tree or not calls:
         return calls
     # 收集 trace 树中所有 tool.execute span 的耗时（按出现顺序）
@@ -130,26 +135,56 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
     async def event_gen() -> AsyncIterator[str]:
         queue: asyncio.Queue = asyncio.Queue()
         session_id = req.session_id
+        run_id = f"web_{uuid4().hex[:12]}"
+        sequence = 0
 
         async def _emit(event: str, data: dict) -> None:
-            await queue.put(f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n")
+            nonlocal sequence
+            sequence += 1
+            payload = {
+                "event_id": f"{run_id}:{sequence}",
+                "seq": sequence,
+                "run_id": run_id,
+                "turn_id": run_id,
+                "timestamp": time.time(),
+                **data,
+            }
+            await queue.put(f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n")
 
         # 流式事件钩子：每个关键节点推送
         async def _hook_after_decision(response, step: int) -> None:
             await _emit("step", {
                 "step": step,
-                "tool_calls": [{"name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls],
+                "status": "running",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "tool_call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                        "status": "queued",
+                    }
+                    for tc in response.tool_calls
+                ],
                 "content_preview": (response.content or "")[:200],
                 "is_final": response.is_final_answer,
             })
 
         async def _hook_after_tool(tc, envelope: ToolResult, step: int) -> None:
+            output = envelope.data
+            output_text = str(output)
+            truncated = len(output_text) > 300
+            if truncated:
+                output = {"preview": output_text[:300], "truncated": True}
             await _emit("tool_result", {
                 "step": step,
                 "tool": tc.name,
+                "tool_call_id": tc.id,
                 "arguments": tc.arguments,
                 "success": envelope.success,
-                "data": str(envelope.data)[:300] if envelope.data else None,
+                "status": "succeeded" if envelope.success else "failed",
+                "data": output,
+                "truncated": truncated,
                 "error": envelope.error.model_dump() if envelope.error else None,
                 "duration_ms": (envelope.metadata or {}).get("duration_ms"),
             })
@@ -168,6 +203,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             old_mode = settings.agent_mode
             settings.agent_mode = agent_mode
             try:
+                await _emit("run_started", {"status": "running", "mode": agent_mode})
                 result = await runtime.run(req.message, session_id=session_id, extra_hooks=hooks)
                 # 附带 Trace 树（Agent 工作流可视化）
                 trace_tree = None
@@ -177,6 +213,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     except Exception:
                         trace_tree = None
                 await _emit("done", {
+                    "status": "succeeded",
                     "session_id": result.session_id,
                     "answer": result.answer,
                     "tool_calls": _tool_calls_with_duration(result, trace_tree),
@@ -186,9 +223,9 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                     "trace": trace_tree,
                 })
             except AgentError as exc:
-                await _emit("error", {"type": type(exc).__name__, "message": str(exc)})
+                await _emit("error", {"status": "failed", "type": type(exc).__name__, "message": str(exc)})
             except Exception as exc:
-                await _emit("error", {"type": type(exc).__name__, "message": str(exc)})
+                await _emit("error", {"status": "failed", "type": type(exc).__name__, "message": str(exc)})
             finally:
                 settings.agent_mode = old_mode
                 await queue.put(None)  # 结束信号
