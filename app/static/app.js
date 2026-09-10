@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v8 */
+/* ReAgent Web UI 前端逻辑 v9 */
 "use strict";
 
 const state = {
@@ -17,6 +17,7 @@ const state = {
   planRevisions: 0,
   planSnapshots: new Map(),
   planRevisionReasons: new Map(),
+  orchestrationRuns: new Map(),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -44,6 +45,7 @@ function startExecution(data) {
   state.executionTools = 0;
   state.followLatest = true;
   clearLivePlan();
+  clearLiveOrchestrations();
   const title = $("#workspace-title");
   if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
   updateExecutionStatus("running", "执行中", "正在准备执行环境");
@@ -362,6 +364,345 @@ function applyPlanLifecycleEvent(type, payload, timestamp) {
   return false;
 }
 
+function orchestrationStateName(status) {
+  const value = String(status || "PENDING").toUpperCase();
+  const mapping = {
+    PENDING: "pending",
+    SCHEDULED: "pending",
+    RUNNING: "running",
+    SUCCEEDED: "succeeded",
+    COMPLETED: "succeeded",
+    PARTIAL: "partial",
+    FAILED: "failed",
+    SKIPPED: "skipped",
+  };
+  return mapping[value] || "pending";
+}
+
+function orchestrationStateLabel(status) {
+  const labels = {
+    pending: "待执行",
+    running: "执行中",
+    succeeded: "已完成",
+    partial: "部分完成",
+    failed: "失败",
+    skipped: "已跳过",
+  };
+  return labels[orchestrationStateName(status)] || "待执行";
+}
+
+function orchestrationStateIcon(status) {
+  const stateName = orchestrationStateName(status);
+  if (stateName === "succeeded") return "●";
+  if (stateName === "partial") return "◐";
+  if (stateName === "failed") return "×";
+  if (stateName === "skipped") return "–";
+  if (stateName === "running") return "◌";
+  return "○";
+}
+
+function getOrchestrationRun(runId) {
+  if (!runId) return null;
+  let run = state.orchestrationRuns.get(runId);
+  if (!run) {
+    run = {
+      runId,
+      parentRunId: null,
+      depth: 1,
+      taskPreview: "",
+      requestedAgents: [],
+      rationale: "",
+      status: "PENDING",
+      stage: "等待编排",
+      durationMs: null,
+      agents: new Map(),
+      planOrder: [],
+    };
+    state.orchestrationRuns.set(runId, run);
+  }
+  return run;
+}
+
+function upsertOrchestrationAgent(run, payload) {
+  if (!run || !payload.agent_instance_id) return null;
+  const id = String(payload.agent_instance_id);
+  let agent = run.agents.get(id);
+  if (!agent) {
+    agent = {
+      id,
+      profile: "未命名 Agent",
+      stepIndex: 0,
+      taskPreview: "",
+      dependsOn: [],
+      status: "PENDING",
+      stage: "等待调度",
+      answerPreview: "",
+      error: "",
+      durationMs: null,
+      toolCalls: 0,
+      completedToolCallIds: new Set(),
+      toolSummary: "",
+    };
+    run.agents.set(id, agent);
+  }
+  if (payload.agent_profile) agent.profile = String(payload.agent_profile);
+  if (Number.isFinite(Number(payload.step_index))) agent.stepIndex = Number(payload.step_index);
+  if (payload.task_preview) agent.taskPreview = String(payload.task_preview);
+  if (Array.isArray(payload.depends_on)) agent.dependsOn = [...payload.depends_on];
+  if (!run.planOrder.includes(id)) run.planOrder.push(id);
+  return agent;
+}
+
+function clearLiveOrchestrations() {
+  const section = $("#live-orchestration-section");
+  const list = $("#live-orchestrations");
+  const meta = $("#live-orchestration-meta");
+  state.orchestrationRuns.clear();
+  if (list) list.replaceChildren();
+  if (meta) meta.textContent = "0 个编排";
+  if (section) section.hidden = true;
+}
+
+function renderOrchestrationAgent(agent) {
+  const stateName = orchestrationStateName(agent.status);
+  const item = document.createElement("div");
+  item.className = "live-agent-item " + stateName;
+  const icon = document.createElement("span");
+  icon.className = "live-agent-icon";
+  icon.textContent = orchestrationStateIcon(agent.status);
+  icon.setAttribute("aria-label", orchestrationStateLabel(agent.status));
+
+  const copy = document.createElement("div");
+  copy.className = "live-agent-copy";
+  const title = document.createElement("strong");
+  title.textContent = agent.profile + " · 步骤 " + String(agent.stepIndex + 1);
+  copy.appendChild(title);
+
+  const task = document.createElement("span");
+  task.textContent = agent.taskPreview || agent.stage || "等待执行";
+  copy.appendChild(task);
+
+  const metaParts = [];
+  if (agent.dependsOn.length) metaParts.push("依赖 " + agent.dependsOn.map((index) => String(Number(index) + 1)).join("、"));
+  if (agent.durationMs != null) metaParts.push("耗时 " + formatMs(agent.durationMs));
+  if (agent.toolCalls) metaParts.push(String(agent.toolCalls) + " 次工具");
+  if (metaParts.length) {
+    const meta = document.createElement("span");
+    meta.className = "live-agent-meta";
+    meta.textContent = metaParts.join(" · ");
+    copy.appendChild(meta);
+  }
+  if (agent.answerPreview) {
+    const answer = document.createElement("span");
+    answer.className = "live-agent-result";
+    answer.textContent = agent.answerPreview;
+    copy.appendChild(answer);
+  }
+  if (agent.toolSummary) {
+    const tool = document.createElement("span");
+    tool.className = "live-agent-tool";
+    tool.textContent = agent.toolSummary;
+    copy.appendChild(tool);
+  }
+  if (agent.error) {
+    const error = document.createElement("span");
+    error.className = "live-agent-error";
+    error.textContent = agent.error;
+    copy.appendChild(error);
+  }
+  item.append(icon, copy);
+  return item;
+}
+
+function renderLiveOrchestrations() {
+  const section = $("#live-orchestration-section");
+  const list = $("#live-orchestrations");
+  const meta = $("#live-orchestration-meta");
+  if (!section || !list || !meta) return;
+  const runs = [...state.orchestrationRuns.values()].sort((left, right) => {
+    if (left.depth !== right.depth) return left.depth - right.depth;
+    return left.runId.localeCompare(right.runId);
+  });
+  if (!runs.length) {
+    section.hidden = true;
+    meta.textContent = "0 个编排";
+    list.replaceChildren();
+    return;
+  }
+
+  const running = runs.filter((run) => orchestrationStateName(run.status) === "running").length;
+  meta.textContent = String(runs.length) + " 个编排" + (running ? " · " + String(running) + " 运行中" : "");
+  section.hidden = false;
+  list.replaceChildren();
+
+  runs.forEach((run) => {
+    const stateName = orchestrationStateName(run.status);
+    const details = document.createElement("details");
+    details.className = "live-orchestration " + stateName;
+    details.open = run.expanded !== false;
+    details.addEventListener("toggle", () => { run.expanded = details.open; });
+
+    const summary = document.createElement("summary");
+    const summaryIcon = document.createElement("span");
+    summaryIcon.className = "live-orchestration-icon";
+    summaryIcon.textContent = orchestrationStateIcon(run.status);
+    const summaryCopy = document.createElement("span");
+    summaryCopy.className = "live-orchestration-summary";
+    const title = document.createElement("strong");
+    title.textContent = "编排层级 " + String(run.depth) + (run.parentRunId ? " · 嵌套" : "") + " · " + orchestrationStateLabel(run.status);
+    const task = document.createElement("span");
+    task.textContent = run.taskPreview || run.stage || "子 Agent 编排";
+    summaryCopy.append(title, task);
+    summary.append(summaryIcon, summaryCopy);
+    details.appendChild(summary);
+
+    const body = document.createElement("div");
+    body.className = "live-orchestration-body";
+    if (run.rationale) {
+      const rationale = document.createElement("p");
+      rationale.className = "live-orchestration-rationale";
+      rationale.textContent = "分工说明：" + run.rationale;
+      body.appendChild(rationale);
+    }
+    const stage = document.createElement("p");
+    stage.className = "live-orchestration-stage";
+    stage.textContent = run.stage || "等待执行";
+    body.appendChild(stage);
+
+    const agentList = document.createElement("div");
+    agentList.className = "live-agent-list";
+    const orderedAgents = [
+      ...run.planOrder.map((id) => run.agents.get(id)).filter(Boolean),
+      ...[...run.agents.values()].filter((agent) => !run.planOrder.includes(agent.id)),
+    ];
+    orderedAgents.forEach((agent) => agentList.appendChild(renderOrchestrationAgent(agent)));
+    if (orderedAgents.length) body.appendChild(agentList);
+    details.appendChild(body);
+    list.appendChild(details);
+  });
+}
+
+function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
+  if (!type.startsWith("orchestration.") && !type.startsWith("agent.")) return false;
+  const run = getOrchestrationRun(payload.run_id);
+  if (!run) return true;
+
+  if (type === "orchestration.started") {
+    run.parentRunId = payload.parent_run_id || null;
+    run.depth = Number(payload.depth) || 1;
+    run.taskPreview = String(payload.task_preview || run.taskPreview);
+    run.requestedAgents = Array.isArray(payload.requested_agents) ? [...payload.requested_agents] : [];
+    run.status = "RUNNING";
+    run.stage = "正在生成子 Agent 分工";
+    updateExecutionStatus("running", "执行中", "正在启动子 Agent 编排");
+    appendExecutionEvent("running", "启动子 Agent 编排", "层级 " + String(run.depth), timestamp);
+  } else if (type === "orchestration.plan_created") {
+    run.rationale = String(payload.rationale_preview || "");
+    run.status = "RUNNING";
+    run.stage = "已生成 " + String(payload.total_agents || 0) + " 个子 Agent 步骤";
+    (payload.steps || []).forEach((step) => {
+      const agent = upsertOrchestrationAgent(run, step);
+      if (agent) agent.status = "PENDING";
+    });
+    appendExecutionEvent("running", "已生成子 Agent 分工", String(payload.total_agents || 0) + " 个步骤", timestamp);
+  } else if (type === "agent.scheduled") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    if (agent) {
+      agent.status = "SCHEDULED";
+      agent.stage = "已排队，等待依赖完成";
+    }
+    run.status = "RUNNING";
+    appendExecutionEvent("running", "已安排子 Agent：" + String(payload.agent_profile || ""), "步骤 " + String((Number(payload.step_index) || 0) + 1), timestamp);
+  } else if (type === "agent.started") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    if (agent) {
+      agent.status = "RUNNING";
+      agent.stage = "正在执行子任务";
+    }
+    run.status = "RUNNING";
+    updateExecutionStatus("running", "执行中", "子 Agent 正在执行：" + String(payload.agent_profile || ""));
+    appendExecutionEvent("running", "子 Agent 开始执行：" + String(payload.agent_profile || ""), "步骤 " + String((Number(payload.step_index) || 0) + 1), timestamp);
+  } else if (type === "agent.llm.started") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    if (agent) {
+      agent.status = "RUNNING";
+      agent.stage = "正在请求模型第 " + String(payload.step || "?") + " 轮决策";
+    }
+    appendExecutionEvent("running", String(payload.agent_profile || "子 Agent") + " 开始模型决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
+  } else if (type === "agent.decision") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    if (agent) {
+      agent.status = "RUNNING";
+      agent.stage = payload.is_final ? "已生成子任务结果" : "已决定下一步工具调用";
+      if (payload.is_final && payload.content_preview) agent.answerPreview = String(payload.content_preview);
+    }
+    appendExecutionEvent(
+      "running",
+      String(payload.agent_profile || "子 Agent") + " 完成模型决策",
+      payload.is_final ? "正在整理子任务结果" : "已确定下一步",
+      timestamp
+    );
+  } else if (type === "agent.tool.started" || type === "agent.tool.completed") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    const completed = type === "agent.tool.completed";
+    if (agent) {
+      agent.status = "RUNNING";
+      agent.stage = (completed ? "已完成工具调用：" : "正在调用工具：") + String(payload.tool || "");
+      if (completed) {
+        const toolCallId = String(payload.tool_call_id || "");
+        if (!toolCallId || !agent.completedToolCallIds.has(toolCallId)) {
+          if (toolCallId) agent.completedToolCallIds.add(toolCallId);
+          agent.toolCalls = agent.completedToolCallIds.size || Number(agent.toolCalls || 0) + 1;
+        }
+        const error = payload.error && payload.error.message ? payload.error.message : "";
+        const output = payload.has_output ? String(payload.data ?? "") : "无输出";
+        agent.toolSummary = String(payload.tool || "工具") + "：" + (payload.success === false ? error || "执行失败" : output);
+      }
+    }
+    appendExecutionEvent(
+      completed && payload.success === false ? "error" : completed ? "success" : "running",
+      (completed ? "子 Agent 工具完成：" : "子 Agent 调用工具：") + String(payload.tool || ""),
+      String(payload.agent_profile || ""),
+      timestamp
+    );
+  } else if (type === "agent.completed" || type === "agent.failed" || type === "agent.skipped") {
+    const agent = upsertOrchestrationAgent(run, payload);
+    if (agent) {
+      agent.status = payload.status || (type === "agent.completed" ? "SUCCEEDED" : type === "agent.skipped" ? "SKIPPED" : "FAILED");
+      agent.stage = orchestrationStateLabel(agent.status);
+      agent.answerPreview = String(payload.answer_preview || agent.answerPreview || "");
+      agent.error = String(payload.error || "");
+      agent.durationMs = payload.duration_ms != null ? Number(payload.duration_ms) : agent.durationMs;
+      agent.toolCalls = Number(payload.tool_calls || agent.toolCalls || 0);
+    }
+    const kind = type === "agent.completed" ? "success" : type === "agent.skipped" ? "warning" : "error";
+    appendExecutionEvent(kind, "子 Agent " + orchestrationStateLabel(agent ? agent.status : payload.status) + "：" + String(payload.agent_profile || ""), payload.error || "", timestamp);
+  } else if (type === "orchestration.synthesis_started") {
+    run.status = "RUNNING";
+    run.stage = "子任务已结束，正在整合结果";
+    updateExecutionStatus("running", "执行中", "正在整合子 Agent 结果");
+    appendExecutionEvent("running", "开始整合子 Agent 结果", "共 " + String(payload.total_agents || 0) + " 个子任务", timestamp);
+  } else if (type === "orchestration.completed") {
+    run.status = payload.status || "SUCCEEDED";
+    run.durationMs = payload.duration_ms != null ? Number(payload.duration_ms) : null;
+    run.stage = orchestrationStateLabel(run.status) + (run.durationMs != null ? " · 耗时 " + formatMs(run.durationMs) : "");
+    appendExecutionEvent(
+      run.status === "FAILED" ? "error" : run.status === "PARTIAL" ? "warning" : "success",
+      "子 Agent 编排" + orchestrationStateLabel(run.status),
+      run.durationMs != null ? "耗时 " + formatMs(run.durationMs) : "",
+      timestamp
+    );
+  } else if (type === "orchestration.failed") {
+    run.status = "FAILED";
+    run.stage = "编排失败";
+    appendExecutionEvent("error", "子 Agent 编排失败", payload.error || "", timestamp);
+  } else {
+    return false;
+  }
+  renderLiveOrchestrations();
+  return true;
+}
+
 function renderExecutionHistory(records) {
   state.executionHistory = Array.isArray(records) ? records : [];
   const container = $("#execution-history");
@@ -553,6 +894,7 @@ function replayExecution(record, events) {
   state.executionSteps = 0;
   state.executionTools = 0;
   clearLivePlan();
+  clearLiveOrchestrations();
 
   const title = $("#workspace-title");
   if (title) title.textContent = truncateForWorkspace(record.input_preview || "历史执行");
@@ -578,7 +920,7 @@ function replayExecutionEvent(event) {
   const timestamp = event.timestamp;
   const type = event.event_type;
 
-  if (applyPlanLifecycleEvent(type, payload, timestamp)) return;
+  if (applyOrchestrationLifecycleEvent(type, payload, timestamp) || applyPlanLifecycleEvent(type, payload, timestamp)) return;
 
   if (type === "llm.started") {
     appendExecutionEvent("running", "模型开始决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
@@ -1858,7 +2200,7 @@ function handleFrame(frame, contentEl, onComplete) {
   let data;
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
-  if (applyPlanLifecycleEvent(event, data, data.timestamp)) return;
+  if (applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
 
   switch (event) {
     case "execution.started":

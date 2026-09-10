@@ -13,9 +13,11 @@
 """
 import time
 
+from app.agent.react_loop import LoopHooks, run_react_loop
 from app.config import Settings, get_settings
 from app.llm.client import BaseLLMClient
 from app.orchestrator.context import orchestration_depth
+from app.orchestrator.events import OrchestrationHooks, notify
 from app.orchestrator.models import AgentRunResult
 from app.orchestrator.profiles import AgentProfile
 from app.tools.gateway import ToolGateway
@@ -69,6 +71,10 @@ class SubAgentExecutor:
         profile: AgentProfile,
         task: str,
         context: str = "",
+        *,
+        hooks: OrchestrationHooks | None = None,
+        orchestration_run_id: str = "",
+        agent_instance_id: str = "",
     ) -> AgentRunResult:
         """运行一个子 agent。返回结构化结果，任何异常都被包装为 FAILED 结果。"""
         start = time.perf_counter()
@@ -87,10 +93,59 @@ class SubAgentExecutor:
         ]
 
         result = AgentRunResult(agent=profile.name, task=task)
+
+        async def _before_llm(step: int, _messages: list[dict]) -> None:
+            await notify(
+                hooks,
+                "agent_llm_started",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                step,
+            )
+
+        async def _after_decision(response, step: int) -> None:
+            await notify(
+                hooks,
+                "agent_decision",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                response,
+                step,
+            )
+
+        async def _before_tool(tool_call, step: int) -> None:
+            await notify(
+                hooks,
+                "agent_tool_started",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                tool_call,
+                step,
+            )
+
+        async def _after_tool(tool_call, envelope, step: int) -> None:
+            await notify(
+                hooks,
+                "agent_tool_completed",
+                orchestration_run_id,
+                agent_instance_id,
+                profile.name,
+                tool_call,
+                envelope,
+                step,
+            )
+
+        react_hooks = LoopHooks(
+            before_llm=_before_llm,
+            after_decision=_after_decision,
+            before_tool=_before_tool,
+            after_tool=_after_tool,
+        )
         try:
             # 子 agent 的 llm 调用也包上 llm_call span（嵌套在 agent.run 下）
-            from app.agent.react_loop import run_react_loop
-
             llm_for_loop = _InstrumentedLLM(self.llm, self.recorder, self.settings.llm_model)
 
             async with trace_span(
@@ -106,6 +161,7 @@ class SubAgentExecutor:
                     messages=messages,
                     execute_tool=_execute_tool,
                     max_steps=profile.max_steps,
+                    hooks=react_hooks,
                 )
                 span.output = {
                     "answer": answer,

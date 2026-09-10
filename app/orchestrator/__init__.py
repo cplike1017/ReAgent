@@ -9,6 +9,7 @@
     repository  —— 编排结果仓库（SQLite，按会话查询/回放）
     tool        —— delegate 工具（主 agent 的委派入口）
 """
+from app.orchestrator.events import OrchestrationHooks
 from app.orchestrator.models import AgentRunResult, OrchestrationPlan, OrchestrationResult
 from app.orchestrator.planner import OrchestratorPlanner
 from app.orchestrator.profiles import AgentProfile, BUILTIN_PROFILES, get_profile
@@ -21,6 +22,7 @@ __all__ = [
     "AgentProfile",
     "AgentRunResult",
     "BUILTIN_PROFILES",
+    "OrchestrationHooks",
     "OrchestrationPlan",
     "OrchestrationRecord",
     "OrchestrationResult",

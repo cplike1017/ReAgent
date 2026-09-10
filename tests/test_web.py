@@ -11,10 +11,11 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.execution.models import ExecutionStatus
+from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
 from app.main import create_app
 
 
-def _make_app(tmp_path):
+def _make_app(tmp_path, *, orchestrator_enabled: bool = False):
     settings = Settings(
         environment="test",
         trace_enabled=False,
@@ -25,6 +26,9 @@ def _make_app(tmp_path):
         database_url=f"sqlite:///{tmp_path}/web.db",
         trace_file=str(tmp_path / "traces.jsonl"),
         eval_run_dir=str(tmp_path / "runs"),
+        orchestrator_enabled=orchestrator_enabled,
+        orchestrator_planner_strategy="llm",
+        agent_profiles_file=str(tmp_path / "profiles.json"),
     )
     fake_redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     return create_app(settings, redis=fake_redis)
@@ -43,6 +47,56 @@ def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
     return events
 
 
+class _DelegatingLLM(BaseLLMClient):
+    """用于 Web SSE 集成测试：根 Agent 调 delegate，子 Agent 直接完成。"""
+
+    model = "delegating-test"
+
+    async def chat(self, messages, tools=None, **kwargs):
+        text = "\n".join(str(message.get("content") or "") for message in messages)
+        if "可用子 Agent 档案" in text:
+            return LLMResponse(
+                content=(
+                    '{"rationale":"由研究员完成资料核验",'
+                    '"steps":[{"agent":"researcher","task":"核验资料","depends_on":[]}]}'
+                ),
+                model=self.model,
+            )
+        if any(message.get("role") == "tool" for message in messages):
+            return LLMResponse(content="主任务已完成", model=self.model)
+        if "资深研究员" in text:
+            return LLMResponse(content="研究员已完成核验", model=self.model)
+        tool_names = {
+            item.get("function", {}).get("name")
+            for item in (tools or [])
+            if isinstance(item, dict)
+        }
+        if "delegate" in tool_names:
+            return LLMResponse(
+                tool_calls=[
+                    ToolCallRequest(
+                        id="call_delegate_web",
+                        name="delegate",
+                        arguments={"task":"核验资料", "agents":["researcher"]},
+                    )
+                ],
+                finish_reason="tool_calls",
+                model=self.model,
+            )
+        return LLMResponse(content="普通回答", model=self.model)
+
+
+def _install_delegating_llm(client) -> None:
+    """让 Web Runtime 与其编排器共享同一确定性 LLM。"""
+    llm = _DelegatingLLM()
+    runtime = client.app.state.runtime
+    runtime.llm = llm
+    runtime.context_builder.llm = llm
+    runtime.orchestrator.llm = llm
+    runtime.orchestrator.planner.llm = llm
+    runtime.orchestrator.executor.llm = llm
+
+
 def test_web_index(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         r = client.get("/")
@@ -51,6 +105,7 @@ def test_web_index(tmp_path):
         assert 'id="open-inspector"' in r.text
         assert 'id="toggle-navigation"' in r.text
         assert 'id="jump-latest"' in r.text
+        assert 'id="live-orchestration-section"' in r.text
 
 
 def test_web_capabilities(tmp_path):
@@ -189,6 +244,51 @@ def test_web_plan_streams_lifecycle_events(tmp_path):
 
         stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
         assert [event["event_type"] for event in stored] == names
+
+
+def test_web_streams_and_persists_subagent_lifecycle_events(tmp_path):
+    """delegate 内部的编排/子 Agent 过程必须进入同一 SSE 与历史事件流。"""
+    with TestClient(_make_app(tmp_path, orchestrator_enabled=True)) as client:
+        _install_delegating_llm(client)
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "请委派一名研究员核验资料", "agent_mode": "react"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        required = {
+            "orchestration.started",
+            "orchestration.plan_created",
+            "agent.scheduled",
+            "agent.started",
+            "agent.llm.started",
+            "agent.decision",
+            "agent.completed",
+            "orchestration.synthesis_started",
+            "orchestration.completed",
+        }
+        assert required <= set(names)
+        assert names.index("orchestration.started") < names.index("orchestration.plan_created")
+        assert names.index("agent.scheduled") < names.index("agent.started")
+        assert names.index("agent.completed") < names.index("orchestration.completed")
+
+        orchestration_started = next(data for name, data in events if name == "orchestration.started")
+        run_id = orchestration_started["run_id"]
+        plan = next(data for name, data in events if name == "orchestration.plan_created")
+        scheduled = next(data for name, data in events if name == "agent.scheduled")
+        completed = next(data for name, data in events if name == "agent.completed")
+        assert plan["run_id"] == scheduled["run_id"] == completed["run_id"] == run_id
+        assert scheduled["agent_instance_id"] == completed["agent_instance_id"] == f"{run_id}:agent:0"
+        assert scheduled["depends_on"] == []
+        assert completed["status"] == "SUCCEEDED"
+
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        assert [event["event_type"] for event in stored] == names
+
 
 
 def test_web_stream_persists_execution_events(tmp_path):

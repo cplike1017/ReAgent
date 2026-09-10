@@ -9,6 +9,7 @@ from app.agent.runtime import AgentRuntime
 from app.config import Settings
 from app.errors import LLMError
 from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest
+from app.orchestrator.events import OrchestrationHooks
 from app.orchestrator.executor import SubAgentExecutor
 from app.orchestrator.planner import OrchestratorPlanner
 from app.orchestrator.profiles import get_profile
@@ -297,6 +298,94 @@ async def test_executor_wraps_exceptions(orch_settings, registry):
     result = await executor.execute(get_profile("generalist"), "爆炸任务")
     assert result.status == "FAILED"
     assert "LLMError" in result.error
+
+
+# ---------------------------------------------------------------------------
+# 实时编排事件：稳定实例 ID、真实生命周期、嵌套 delegate 继承观察器
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_runner_emits_agent_lifecycle_events(orch_settings, registry):
+    """并行子 Agent 的每个真实节点都应带同一 run_id 和稳定实例 ID。"""
+    llm = ScriptedLLM(plan_json=PLAN_TWO, synthesize_text="合成答案")
+    runner = OrchestratorRunner(llm=llm, registry=registry, settings=orch_settings)
+    events: list[tuple[str, tuple]] = []
+
+    def observe(name: str):
+        async def callback(*args):
+            events.append((name, args))
+        return callback
+
+    hooks = OrchestrationHooks(
+        orchestration_started=observe("orchestration.started"),
+        orchestration_plan_created=observe("orchestration.plan_created"),
+        agent_scheduled=observe("agent.scheduled"),
+        agent_started=observe("agent.started"),
+        agent_llm_started=observe("agent.llm.started"),
+        agent_decision=observe("agent.decision"),
+        agent_completed=observe("agent.completed"),
+        agent_failed=observe("agent.failed"),
+        orchestration_synthesis_started=observe("orchestration.synthesis_started"),
+        orchestration_completed=observe("orchestration.completed"),
+    )
+
+    result = await runner.run("调研课题", hooks=hooks)
+    names = [name for name, _ in events]
+    started = next(args for name, args in events if name == "orchestration.started")
+    run_id = started[0]
+
+    assert result.run_id == run_id
+    assert names[0] == "orchestration.started"
+    assert names.index("orchestration.plan_created") < names.index("agent.scheduled")
+    assert names.index("orchestration.synthesis_started") > max(
+        index for index, name in enumerate(names) if name == "agent.completed"
+    )
+    assert names[-1] == "orchestration.completed"
+    assert names.count("agent.scheduled") == 2
+    assert names.count("agent.started") == 2
+    assert names.count("agent.llm.started") == 2
+    assert names.count("agent.decision") == 2
+    assert names.count("agent.completed") == 2
+    assert "agent.failed" not in names
+
+    scheduled_ids = {
+        args[1] for name, args in events if name == "agent.scheduled"
+    }
+    completed_ids = {
+        args[1] for name, args in events if name == "agent.completed"
+    }
+    assert scheduled_ids == completed_ids == {f"{run_id}:agent:0", f"{run_id}:agent:1"}
+
+
+@pytest.mark.asyncio
+async def test_nested_delegate_inherits_orchestration_observer(orch_settings, registry):
+    """子 Agent 再委派时，嵌套编排应留在同一观察流并关联父 run。"""
+    llm = ScriptedLLM()
+    runner = OrchestratorRunner(llm=llm, registry=registry, settings=orch_settings)
+    _registry_with_delegate(registry, runner)
+    starts: list[tuple] = []
+    completed: list[tuple] = []
+
+    async def on_started(*args):
+        starts.append(args)
+
+    async def on_completed(*args):
+        completed.append(args)
+
+    result = await runner.run(
+        "检索资料并委派给 writer 细化",
+        agents=["researcher"],
+        hooks=OrchestrationHooks(
+            orchestration_started=on_started,
+            orchestration_completed=on_completed,
+        ),
+    )
+
+    assert len(starts) == 2
+    outer = next(item for item in starts if item[2] == 1)
+    nested = next(item for item in starts if item[2] == 2)
+    assert outer[0] == result.run_id
+    assert nested[1] == outer[0]
+    assert {item[0] for item in completed} == {outer[0], nested[0]}
 
 
 # ---------------------------------------------------------------------------

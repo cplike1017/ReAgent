@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from app.agent.react_loop import LoopHooks
 from app.errors import AgentError
 from app.execution.models import ExecutionStatus
+from app.orchestrator.events import OrchestrationHooks
 from app.tools.schemas import ToolResult
 
 router = APIRouter(prefix="/api/web", tags=["web"])
@@ -230,6 +231,19 @@ def _plan_step_payload(step, *, plan_version: int, total_steps: int) -> dict:
     }
 
 
+def _orchestration_step_payload(run_id: str, agent_instance_id: str, step_index: int, step) -> dict:
+    """子 Agent 调度事件的稳定关联字段；依赖边来自真实编排计划。"""
+    data = step.model_dump(mode="json")
+    return {
+        "run_id": run_id,
+        "agent_instance_id": agent_instance_id,
+        "step_index": step_index,
+        "agent_profile": data["agent"],
+        "task_preview": _preview(data["task"], 240)[0],
+        "depends_on": data.get("depends_on") or [],
+    }
+
+
 @router.post("/chat/stream")
 async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingResponse:
     runtime = _get_runtime(request)
@@ -402,6 +416,195 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 },
             )
 
+        async def _hook_orchestration_started(run_id, parent_run_id, depth: int, task: str, agents) -> None:
+            await _emit(
+                "orchestration.started",
+                {
+                    "run_id": run_id,
+                    "parent_run_id": parent_run_id,
+                    "depth": depth,
+                    "task_preview": _preview(task, 240)[0],
+                    "requested_agents": agents or [],
+                },
+            )
+
+        async def _hook_orchestration_plan_created(run_id, plan) -> None:
+            await _emit(
+                "orchestration.plan_created",
+                {
+                    "run_id": run_id,
+                    "rationale_preview": _preview(plan.rationale, 360)[0],
+                    "total_agents": len(plan.steps),
+                    "steps": [
+                        _orchestration_step_payload(
+                            run_id,
+                            f"{run_id}:agent:{index}",
+                            index,
+                            step,
+                        )
+                        for index, step in enumerate(plan.steps)
+                    ],
+                },
+            )
+
+        async def _hook_agent_scheduled(run_id, agent_instance_id, step_index: int, step) -> None:
+            await _emit(
+                "agent.scheduled",
+                _orchestration_step_payload(run_id, agent_instance_id, step_index, step),
+            )
+
+        async def _hook_agent_started(run_id, agent_instance_id, step_index: int, step) -> None:
+            await _emit(
+                "agent.started",
+                _orchestration_step_payload(run_id, agent_instance_id, step_index, step),
+            )
+
+        async def _hook_agent_llm_started(run_id, agent_instance_id, profile: str, step: int) -> None:
+            await _emit(
+                "agent.llm.started",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                },
+            )
+
+        async def _hook_agent_decision(run_id, agent_instance_id, profile: str, response, step: int) -> None:
+            await _emit(
+                "agent.decision",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "is_final": response.is_final_answer,
+                    "content_preview": _preview(response.content or "", 360)[0] if response.is_final_answer else "",
+                    "tool_calls": [
+                        {"tool_call_id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in response.tool_calls
+                    ],
+                },
+            )
+
+        async def _hook_agent_tool_started(run_id, agent_instance_id, profile: str, tc, step: int) -> None:
+            await _emit(
+                "agent.tool.started",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "tool_call_id": tc.id,
+                    "tool": tc.name,
+                    "arguments": tc.arguments,
+                },
+            )
+
+        async def _hook_agent_tool_completed(run_id, agent_instance_id, profile: str, tc, envelope: ToolResult, step: int) -> None:
+            output, truncated = _preview(envelope.data, 1000)
+            await _emit(
+                "agent.tool.completed",
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "agent_profile": profile,
+                    "step": step,
+                    "tool_call_id": tc.id,
+                    "tool": tc.name,
+                    "arguments": tc.arguments,
+                    "success": envelope.success,
+                    "has_output": envelope.success or envelope.data is not None,
+                    "data": output,
+                    "output_truncated": truncated,
+                    "output_type": type(envelope.data).__name__,
+                    "error": envelope.error.model_dump() if envelope.error else None,
+                    "duration_ms": (envelope.metadata or {}).get("duration_ms"),
+                    "retries": (envelope.metadata or {}).get("retries", 0),
+                },
+            )
+
+        async def _hook_agent_finished(event_name: str, run_id, agent_instance_id, step_index: int, result) -> None:
+            await _emit(
+                event_name,
+                {
+                    "run_id": run_id,
+                    "agent_instance_id": agent_instance_id,
+                    "step_index": step_index,
+                    "agent_profile": result.agent,
+                    "task_preview": _preview(result.task, 240)[0],
+                    "status": result.status,
+                    "answer_preview": _preview(result.answer, 600)[0] if result.answer else "",
+                    "error": result.error,
+                    "steps": result.steps,
+                    "tool_calls": len(result.tool_calls),
+                    "duration_ms": result.duration_ms,
+                },
+            )
+
+        async def _hook_agent_completed(run_id, agent_instance_id, step_index: int, result) -> None:
+            await _hook_agent_finished("agent.completed", run_id, agent_instance_id, step_index, result)
+
+        async def _hook_agent_failed(run_id, agent_instance_id, step_index: int, result) -> None:
+            await _hook_agent_finished("agent.failed", run_id, agent_instance_id, step_index, result)
+
+        async def _hook_agent_skipped(run_id, agent_instance_id, step_index: int, result) -> None:
+            await _hook_agent_finished("agent.skipped", run_id, agent_instance_id, step_index, result)
+
+        async def _hook_orchestration_synthesis_started(run_id, results) -> None:
+            await _emit(
+                "orchestration.synthesis_started",
+                {
+                    "run_id": run_id,
+                    "total_agents": len(results),
+                    "succeeded_agents": sum(result.status == "SUCCEEDED" for result in results),
+                    "failed_agents": sum(result.status == "FAILED" for result in results),
+                    "skipped_agents": sum(result.status == "SKIPPED" for result in results),
+                },
+            )
+
+        async def _hook_orchestration_completed(run_id, result) -> None:
+            await _emit(
+                "orchestration.completed",
+                {
+                    "run_id": run_id,
+                    "status": result.status,
+                    "duration_ms": result.duration_ms,
+                    "total_agents": len(result.agent_results),
+                    "succeeded_agents": sum(item.status == "SUCCEEDED" for item in result.agent_results),
+                    "failed_agents": sum(item.status == "FAILED" for item in result.agent_results),
+                    "skipped_agents": sum(item.status == "SKIPPED" for item in result.agent_results),
+                },
+            )
+
+        async def _hook_orchestration_failed(run_id, parent_run_id, depth: int, error: str) -> None:
+            await _emit(
+                "orchestration.failed",
+                {
+                    "run_id": run_id,
+                    "parent_run_id": parent_run_id,
+                    "depth": depth,
+                    "error": error,
+                },
+            )
+
+        orchestration_hooks = OrchestrationHooks(
+            orchestration_started=_hook_orchestration_started,
+            orchestration_plan_created=_hook_orchestration_plan_created,
+            agent_scheduled=_hook_agent_scheduled,
+            agent_started=_hook_agent_started,
+            agent_llm_started=_hook_agent_llm_started,
+            agent_decision=_hook_agent_decision,
+            agent_tool_started=_hook_agent_tool_started,
+            agent_tool_completed=_hook_agent_tool_completed,
+            agent_completed=_hook_agent_completed,
+            agent_failed=_hook_agent_failed,
+            agent_skipped=_hook_agent_skipped,
+            orchestration_synthesis_started=_hook_orchestration_synthesis_started,
+            orchestration_completed=_hook_orchestration_completed,
+            orchestration_failed=_hook_orchestration_failed,
+        )
+
         hooks = LoopHooks(
             before_llm=_hook_before_llm,
             after_decision=_hook_after_decision,
@@ -439,6 +642,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                             session_id=session_id,
                             turn_id=turn_id,
                             extra_hooks=hooks,
+                            orchestration_hooks=orchestration_hooks,
                         )
                     finally:
                         settings.agent_mode = old_mode

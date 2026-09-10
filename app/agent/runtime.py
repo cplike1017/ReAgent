@@ -512,14 +512,23 @@ class AgentRuntime:
         turn_id: str | None = None,
         user: UserContext | None = None,  # Stage 5 权限上下文
         extra_hooks: LoopHooks | None = None,  # 供 demo/测试注入（如模拟崩溃）
+        orchestration_hooks=None,  # OrchestrationHooks | None：子 Agent 事实观察器
     ) -> AgentTurnResult:
         session_id = session_id or f"session_{uuid4().hex[:12]}"
         turn_id = turn_id or f"turn_{uuid4().hex[:12]}"
 
         # Stage 12：注入当前会话上下文（delegate 工具用它持久化编排结果）
+        # 编排观察器也放入 task-local 上下文，使 delegate 的嵌套子编排继承同一条
+        # SSE/持久化事件流，而不会污染其他执行。
         from app.orchestrator.context import current_session_id
+        from app.orchestrator.events import current_orchestration_hooks
 
         token_session = current_session_id.set(session_id)
+        token_orchestration_hooks = (
+            current_orchestration_hooks.set(orchestration_hooks)
+            if orchestration_hooks is not None
+            else None
+        )
         try:
             if self.recorder is None or not self.recorder.enabled:
                 return await self._run_body(message, session_id, turn_id, user, extra_hooks)
@@ -539,6 +548,8 @@ class AgentRuntime:
                 }
                 return result
         finally:
+            if token_orchestration_hooks is not None:
+                current_orchestration_hooks.reset(token_orchestration_hooks)
             current_session_id.reset(token_session)
 
     async def _run_body(self, message, session_id, turn_id, user, extra_hooks) -> AgentTurnResult:

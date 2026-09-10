@@ -22,6 +22,7 @@ from uuid import uuid4
 from app.config import Settings, get_settings
 from app.llm.client import BaseLLMClient
 from app.orchestrator.context import current_run_id, orchestration_depth
+from app.orchestrator.events import OrchestrationHooks, current_orchestration_hooks, notify
 from app.orchestrator.executor import SubAgentExecutor
 from app.orchestrator.models import AgentRunResult, OrchestrationPlan, OrchestrationResult
 from app.orchestrator.planner import OrchestratorPlanner
@@ -96,6 +97,7 @@ class OrchestratorRunner:
         *,
         session_id: str = "",
         parent_run_id: str | None = None,
+        hooks: OrchestrationHooks | None = None,
     ) -> OrchestrationResult:
         """执行一次多 Agent 编排（支持嵌套：子 agent 也可再委派）。
 
@@ -105,6 +107,7 @@ class OrchestratorRunner:
         :param max_parallel: 并行上限（默认取配置 orchestrator_max_parallel）
         :param session_id: 所属会话（持久化编排记录用；空则不关联会话）
         :param parent_run_id: 父编排 run_id（多级编排内部自动传递，无需手动传）
+        :param hooks: 可选的业务观察器；嵌套 delegate 自动继承当前观察器。
 
         多级编排：进入时 depth+1、退出时恢复。深度由 ContextVar 追踪，
         并行子 agent 的嵌套委派互不干扰；超限由 delegate 工具可见性
@@ -114,10 +117,12 @@ class OrchestratorRunner:
         orchestrations 表，parent_run_id 关联多级编排的父子关系。
         """
         depth = orchestration_depth.get() + 1
-        token = orchestration_depth.set(depth)
+        token_depth = orchestration_depth.set(depth)
         run_id = f"run_{uuid4().hex[:12]}"
         parent = parent_run_id or current_run_id.get()  # 嵌套时指向外层 run_id
         token_run = current_run_id.set(run_id)
+        active_hooks = hooks or current_orchestration_hooks.get()
+        token_hooks = current_orchestration_hooks.set(active_hooks)
         # 会话透传：嵌套编排（子 agent 再 delegate）的 handler 从 contextvar 读到
         # 同一个 session_id，整棵编排树都挂到同一会话下
         token_session = None
@@ -126,27 +131,50 @@ class OrchestratorRunner:
 
             token_session = current_session_id.set(session_id)
         try:
-            result = await self._run(task, agents, context, max_parallel)
+            await notify(active_hooks, "orchestration_started", run_id, parent, depth, task, agents)
+            try:
+                result = await self._run(
+                    task,
+                    agents,
+                    context,
+                    max_parallel,
+                    run_id=run_id,
+                    hooks=active_hooks,
+                )
+            except Exception as exc:
+                await notify(
+                    active_hooks,
+                    "orchestration_failed",
+                    run_id,
+                    parent,
+                    depth,
+                    f"{type(exc).__name__}: {exc}",
+                )
+                raise
+
+            # 无论是否启用仓库，实时事件都需要一个可关联的稳定 run_id。
+            result.run_id = run_id
+            # 持久化编排记录（repository 注入时；失败不影响编排结果本身）
+            if self.repository is not None:
+                try:
+                    record = OrchestrationRecord.from_result(
+                        result,
+                        session_id=session_id,
+                        parent_run_id=parent,
+                        depth=depth,
+                    )
+                    record.run_id = run_id
+                    self.repository.save(record)
+                except Exception:
+                    pass
+            await notify(active_hooks, "orchestration_completed", run_id, result)
+            return result
         finally:
-            orchestration_depth.reset(token)
+            orchestration_depth.reset(token_depth)
             current_run_id.reset(token_run)
+            current_orchestration_hooks.reset(token_hooks)
             if token_session is not None:
                 current_session_id.reset(token_session)
-        # 持久化编排记录（repository 注入时；失败不影响编排结果本身）
-        if self.repository is not None:
-            try:
-                record = OrchestrationRecord.from_result(
-                    result,
-                    session_id=session_id,
-                    parent_run_id=parent,
-                    depth=depth,
-                )
-                record.run_id = run_id
-                self.repository.save(record)
-                result.run_id = run_id
-            except Exception:
-                pass
-        return result
 
     async def _run(
         self,
@@ -154,12 +182,16 @@ class OrchestratorRunner:
         agents: list[str] | None,
         context: str,
         max_parallel: int | None,
+        *,
+        run_id: str,
+        hooks: OrchestrationHooks | None,
     ) -> OrchestrationResult:
         start = time.perf_counter()
         plan = await self.planner.plan(task, agents=agents)
+        await notify(hooks, "orchestration_plan_created", run_id, plan)
 
         if self.recorder is None or not self.recorder.enabled:
-            return await self._run_impl(task, plan, context, max_parallel, start)
+            return await self._run_impl(task, plan, context, max_parallel, start, run_id=run_id, hooks=hooks)
 
         async with trace_span(
             "orchestrator.run",
@@ -168,7 +200,7 @@ class OrchestratorRunner:
             attributes={"agents": agents, "steps": len(plan.steps), "depth": orchestration_depth.get()},
             recorder=self.recorder,
         ) as span:
-            result = await self._run_impl(task, plan, context, max_parallel, start)
+            result = await self._run_impl(task, plan, context, max_parallel, start, run_id=run_id, hooks=hooks)
             span.output = {
                 "final_answer": result.final_answer,
                 "status": result.status,
@@ -186,6 +218,9 @@ class OrchestratorRunner:
         context: str,
         max_parallel: int | None,
         start: float,
+        *,
+        run_id: str = "run_local",
+        hooks: OrchestrationHooks | None = None,
     ) -> OrchestrationResult:
         result = OrchestrationResult(task=task, plan=plan)
         if not plan.steps:
@@ -210,21 +245,53 @@ class OrchestratorRunner:
                 # 依赖环 / 死锁防御：剩余步骤标记 SKIPPED
                 for i in range(len(plan.steps)):
                     if i not in done:
-                        results[i] = AgentRunResult(
+                        skipped = AgentRunResult(
                             agent=plan.steps[i].agent,
                             task=plan.steps[i].task,
                             status="SKIPPED",
                             error="依赖未完成（依赖环或前置失败）",
                         )
+                        results[i] = skipped
+                        await notify(
+                            hooks,
+                            "agent_skipped",
+                            run_id,
+                            _agent_instance_id(run_id, i),
+                            i,
+                            skipped,
+                        )
                 break
+
+            # 先公开排队事实，再并行启动，避免 UI 将尚未开始的步骤误报为运行中。
+            for i in ready:
+                await notify(
+                    hooks,
+                    "agent_scheduled",
+                    run_id,
+                    _agent_instance_id(run_id, i),
+                    i,
+                    plan.steps[i],
+                )
 
             async def _run_step(i: int) -> None:
                 async with semaphore:
                     step = plan.steps[i]
                     profile = self.profile_registry.get(step.agent)
+                    agent_instance_id = _agent_instance_id(run_id, i)
+                    await notify(hooks, "agent_started", run_id, agent_instance_id, i, step)
                     dep_context = _build_context(results, step.depends_on)
                     full_context = "\n".join(filter(None, [context, dep_context]))
-                    results[i] = await self.executor.execute(profile, step.task, full_context)
+                    agent_result = await self.executor.execute(
+                        profile,
+                        step.task,
+                        full_context,
+                        hooks=hooks,
+                        orchestration_run_id=run_id,
+                        agent_instance_id=agent_instance_id,
+                    )
+                    results[i] = agent_result
+                    event_name = "agent_completed" if agent_result.status == "SUCCEEDED" else "agent_failed"
+                    await notify(hooks, event_name, run_id, agent_instance_id, i, agent_result)
                     done.add(i)
 
             await asyncio.gather(*(_run_step(i) for i in ready))
@@ -233,6 +300,7 @@ class OrchestratorRunner:
         result.agent_results = [results[i] for i in range(len(plan.steps))]
 
         # 合成最终回答
+        await notify(hooks, "orchestration_synthesis_started", run_id, result.agent_results)
         result.final_answer = await self._synthesize(task, result.agent_results)
         succeeded = sum(1 for r in result.agent_results if r.status == "SUCCEEDED")
         if succeeded == 0:
@@ -276,6 +344,11 @@ class OrchestratorRunner:
         except Exception:
             pass
         return _join_answers(results)
+
+
+def _agent_instance_id(run_id: str, step_index: int) -> str:
+    """同一编排内稳定定位实际执行实例；嵌套 run 自带不同 run_id。"""
+    return f"{run_id}:agent:{step_index}"
 
 
 def _build_context(results: dict[int, AgentRunResult], deps: list[int]) -> str:
