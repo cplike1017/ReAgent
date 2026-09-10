@@ -219,6 +219,17 @@ def _tool_calls_with_duration(result, trace_tree: dict | None) -> list[dict]:
 # ---------------------------------------------------------------------------
 # SSE 流式聊天（复用 LoopHooks 推送事件）
 # ---------------------------------------------------------------------------
+def _plan_step_payload(step, *, plan_version: int, total_steps: int) -> dict:
+    """Plan 步骤事件的稳定关联字段；步骤快照保留真实状态和结果。"""
+    data = step.model_dump(mode="json")
+    return {
+        "plan_version": plan_version,
+        "plan_step_id": data["step_id"],
+        "total_steps": total_steps,
+        "step": data,
+    }
+
+
 @router.post("/chat/stream")
 async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingResponse:
     runtime = _get_runtime(request)
@@ -317,12 +328,94 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 {"step": step, "content": response.content or ""},
             )
 
+        async def _hook_plan_created(plan, plan_version: int, task: str) -> None:
+            await _emit(
+                "plan.created",
+                {
+                    "plan_version": plan_version,
+                    "total_steps": len(plan),
+                    "task_preview": _preview(task, 240)[0],
+                    "steps": [step.model_dump(mode="json") for step in plan],
+                },
+            )
+
+        async def _hook_plan_degraded(plan_version: int, task: str, reason: str) -> None:
+            await _emit(
+                "plan.degraded",
+                {
+                    "plan_version": plan_version,
+                    "task_preview": _preview(task, 240)[0],
+                    "reason": reason,
+                },
+            )
+
+        async def _hook_plan_step_started(step, plan_version: int, total_steps: int) -> None:
+            await _emit(
+                "plan_step.started",
+                _plan_step_payload(step, plan_version=plan_version, total_steps=total_steps),
+            )
+
+        async def _hook_plan_step_completed(step, plan_version: int, total_steps: int) -> None:
+            await _emit(
+                "plan_step.completed",
+                _plan_step_payload(step, plan_version=plan_version, total_steps=total_steps),
+            )
+
+        async def _hook_plan_step_failed(step, plan_version: int, total_steps: int) -> None:
+            await _emit(
+                "plan_step.failed",
+                _plan_step_payload(step, plan_version=plan_version, total_steps=total_steps),
+            )
+
+        async def _hook_plan_summarize_started(plan, plan_version: int) -> None:
+            await _emit(
+                "plan.summarize_started",
+                {
+                    "plan_version": plan_version,
+                    "total_steps": len(plan),
+                    "succeeded_steps": sum(step.status == "SUCCEEDED" for step in plan),
+                    "failed_steps": sum(step.status == "FAILED" for step in plan),
+                },
+            )
+
+        async def _hook_reflection_completed(decision, plan_version: int) -> None:
+            await _emit(
+                "reflection.completed",
+                {
+                    "plan_version": plan_version,
+                    "need_replan": decision.need_replan,
+                    "reason": decision.reason,
+                    "revised_task_preview": _preview(decision.revised_task, 240)[0]
+                    if decision.need_replan and decision.revised_task
+                    else "",
+                },
+            )
+
+        async def _hook_plan_revised(previous_plan, previous_version: int, next_version: int, decision) -> None:
+            await _emit(
+                "plan.revised",
+                {
+                    "previous_plan_version": previous_version,
+                    "next_plan_version": next_version,
+                    "reason": decision.reason,
+                    "previous_steps": [step.model_dump(mode="json") for step in previous_plan],
+                },
+            )
+
         hooks = LoopHooks(
             before_llm=_hook_before_llm,
             after_decision=_hook_after_decision,
             before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
             before_final=_hook_before_final,
+            plan_created=_hook_plan_created,
+            plan_degraded=_hook_plan_degraded,
+            plan_step_started=_hook_plan_step_started,
+            plan_step_completed=_hook_plan_step_completed,
+            plan_step_failed=_hook_plan_step_failed,
+            plan_summarize_started=_hook_plan_summarize_started,
+            reflection_completed=_hook_reflection_completed,
+            plan_revised=_hook_plan_revised,
         )
 
         async def _run() -> None:
@@ -365,6 +458,7 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                         "tool_calls": _tool_calls_with_duration(result, trace_tree),
                         "plan": [step.model_dump() for step in result.plan],
                         "plan_revisions": result.plan_revisions,
+                        "plan_version": result.plan_revisions + 1 if result.plan else None,
                         "trace_id": result.trace_id,
                         "trace": trace_tree,
                     },

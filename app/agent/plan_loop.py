@@ -19,12 +19,12 @@ Plan Loop（规划执行总控，Stage 9 核心）。
     每步执行使用【完全独立】的 messages（step_messages），与全局历史隔离：
       - 每步内的 ReAct 循环产生的 assistant(tool_calls) + tool 消息
         只在 step_messages 内合法交替，绝不写入全局；
-      - 每步结束后，仅把【干净的步骤结果】以纯文本 assistant 消息写回
-        全局 messages（user 提问 → assistant 结果交替），保证全局序列
-        永远满足 OpenAI 协议（无孤儿 tool 消息、无乱序）；
+      - 步骤结果写入 PlanStep 和执行事件，由计划详情展示，不伪装成主对话回答；
+      - 全局 messages 只写入整次计划的最终回答，保持会话历史简洁且协议合法；
       - 重规划时基于干净的全局历史重新执行，不会残留非法片段。
 """
 import json
+from dataclasses import replace
 
 from app.agent.models import PlanStep
 from app.agent.planner import Planner
@@ -46,6 +46,7 @@ class PlanExecutor:
         max_steps_per_step: int = 4,
         context_builder=None,
         hooks: LoopHooks | None = None,
+        step_hooks: LoopHooks | None = None,
     ) -> None:
         self.llm = llm
         self.registry = registry
@@ -54,6 +55,21 @@ class PlanExecutor:
         self.max_steps_per_step = max_steps_per_step
         self.context_builder = context_builder
         self.hooks = hooks
+        # 子步骤只需要向 UI 发出 LLM/工具事实，不应把隔离消息写入主会话。
+        self.step_hooks = step_hooks
+
+    async def _notify(self, name: str, *args) -> None:
+        """只在真实生命周期节点调用已注册的外部观察钩子。"""
+        callback = getattr(self.hooks, name, None) if self.hooks is not None else None
+        if callback is not None:
+            await callback(*args)
+
+    def _step_hooks(self) -> LoopHooks | None:
+        """步骤 ReAct 复用模型/工具观察，但不把子步骤答案当作整轮最终答案。"""
+        source = self.step_hooks if self.step_hooks is not None else self.hooks
+        if source is None:
+            return None
+        return replace(source, before_final=None)
 
     # ------------------------------------------------------------------
     async def execute(
@@ -61,12 +77,14 @@ class PlanExecutor:
         task: str,
         messages: list[dict],
         memory_context: list[str] | None = None,
+        *,
+        plan_version: int = 1,
     ) -> tuple[list[PlanStep], str, list[ToolCallRequest]]:
         """
         执行计划。
 
         :param task: 用户原始任务（用于规划）
-        :param messages: 全局会话消息（仅追加干净的 user/assistant 结果，保持协议合法）
+        :param messages: 全局会话消息（仅追加整轮最终回答，保持协议合法）
         :param memory_context: Stage 8 记忆层检索到的相关记忆（可空，供规划参考）
         :return: (计划步骤(含结果), 最终回答, 全部工具调用)
         """
@@ -74,6 +92,12 @@ class PlanExecutor:
         plan = await self.planner.plan(task, memory_context)
         if not plan:
             # 无计划（off 策略）：降级为直接 ReAct 完整执行
+            await self._notify(
+                "plan_degraded",
+                plan_version,
+                task,
+                "规划器未返回可执行步骤，已改用直接 ReAct。",
+            )
             final_messages, answer, _, calls = await run_react_loop(
                 llm=self.llm,
                 tools_schema=self.registry.schemas(),
@@ -85,6 +109,7 @@ class PlanExecutor:
             )
             return [], answer, calls
 
+        await self._notify("plan_created", plan, plan_version, task)
         all_calls: list[ToolCallRequest] = []
         step_results: list[str] = []
 
@@ -92,6 +117,7 @@ class PlanExecutor:
         total = len(plan)
         for step in plan:
             step.status = "RUNNING"
+            await self._notify("plan_step_started", step, plan_version, total)
             # 每步构造【完全独立】的消息视图：
             #   system: 步骤指令（"只做本步"）
             #   user:   该步骤的独立子任务描述
@@ -112,7 +138,7 @@ class PlanExecutor:
                     execute_tool=self.execute_tool,
                     max_steps=self.max_steps_per_step,
                     context_builder=self.context_builder,
-                    hooks=self.hooks,
+                    hooks=self._step_hooks(),
                 )
                 all_calls.extend(step_calls)
                 # 步骤成功标准：有回答 且（无工具要求 或 至少调用了一次工具）
@@ -125,14 +151,16 @@ class PlanExecutor:
                 step.result = f"{type(exc).__name__}: {str(exc)[:100]}"
                 step_results.append(step.result)
 
-            # 每步结束后：仅把【干净的步骤结果】写回全局消息
-            # （user 提问 + assistant 结果交替，保证协议合法、可持久化）
-            # 每步结束后：仅把【干净的步骤结果】写回全局消息
-            # （原始 user 消息已由 runtime 的 _prepare_messages 追加，
-            #  这里只追加 assistant 结果，保证 user/assistant 交替、协议合法）
-            messages.append({"role": "assistant", "content": f"[{step.description}] {step.result}"})
+            if step.status == "SUCCEEDED":
+                await self._notify("plan_step_completed", step, plan_version, total)
+            else:
+                await self._notify("plan_step_failed", step, plan_version, total)
+
+            # 步骤结果保留在 PlanStep / execution event；不写入主会话消息，
+            # 防止历史回放把子步骤结果误显示为多条最终助手回答。
 
         # 3) 汇总最终回答（独立上下文，不污染全局消息）
+        await self._notify("plan_summarize_started", plan, plan_version)
         answer = await self._summarize(task, plan)
         messages.append({"role": "assistant", "content": answer})
         return plan, answer, all_calls

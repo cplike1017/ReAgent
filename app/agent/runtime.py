@@ -229,11 +229,106 @@ class AgentRuntime:
     async def _hook_before_final(self, response, step: int) -> None:
         """最终回答前：状态置 DONE，保存最后检查点。"""
         state = self._state
-        state.status = "DONE"
+        # Plan 步骤也会运行独立 ReAct；其局部回答不是整个用户回合的终态。
+        state.status = "RUNNING" if state.agent_mode == "plan" else "DONE"
         state.pending_tool_calls = []
         self._persist_and_checkpoint(state, state.messages, "before_final")
         if self._extra_hooks and self._extra_hooks.before_final:
             await self._extra_hooks.before_final(response, step)
+
+    async def _forward_plan_step_before_llm(self, step: int, messages: list[dict]) -> None:
+        """转发隔离子步骤的模型开始事件，不把临时 messages 持久化进主会话。"""
+        if self._extra_hooks and self._extra_hooks.before_llm:
+            await self._extra_hooks.before_llm(step, messages)
+
+    async def _forward_plan_step_after_decision(self, response, step: int) -> None:
+        if self._extra_hooks and self._extra_hooks.after_decision:
+            await self._extra_hooks.after_decision(response, step)
+
+    async def _forward_plan_step_before_tool(self, tool_call, step: int) -> None:
+        if self._extra_hooks and self._extra_hooks.before_tool:
+            await self._extra_hooks.before_tool(tool_call, step)
+
+    async def _forward_plan_step_after_tool(self, tool_call, envelope: ToolResult, step: int) -> None:
+        if self._extra_hooks and self._extra_hooks.after_tool:
+            await self._extra_hooks.after_tool(tool_call, envelope, step)
+
+    def _build_plan_step_hooks(self) -> LoopHooks:
+        """Plan 子步骤的观察钩子：仅向外发布事实，避免污染主会话/检查点。"""
+        return LoopHooks(
+            before_llm=self._forward_plan_step_before_llm,
+            after_decision=self._forward_plan_step_after_decision,
+            before_tool=self._forward_plan_step_before_tool,
+            after_tool=self._forward_plan_step_after_tool,
+        )
+
+    async def _hook_plan_created(self, plan, plan_version: int, task: str) -> None:
+        state = self._state
+        if state is not None:
+            state.plan = plan
+            state.plan_revisions = max(0, plan_version - 1)
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_created")
+        if self._extra_hooks and self._extra_hooks.plan_created:
+            await self._extra_hooks.plan_created(plan, plan_version, task)
+
+    async def _hook_plan_degraded(self, plan_version: int, task: str, reason: str) -> None:
+        state = self._state
+        if state is not None:
+            state.plan = []
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_degraded")
+        if self._extra_hooks and self._extra_hooks.plan_degraded:
+            await self._extra_hooks.plan_degraded(plan_version, task, reason)
+
+    async def _hook_plan_step_started(self, step, plan_version: int, total: int) -> None:
+        state = self._state
+        if state is not None:
+            state.step = step.order + 1
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_step_started")
+        if self._extra_hooks and self._extra_hooks.plan_step_started:
+            await self._extra_hooks.plan_step_started(step, plan_version, total)
+
+    async def _hook_plan_step_completed(self, step, plan_version: int, total: int) -> None:
+        state = self._state
+        if state is not None:
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_step_completed")
+        if self._extra_hooks and self._extra_hooks.plan_step_completed:
+            await self._extra_hooks.plan_step_completed(step, plan_version, total)
+
+    async def _hook_plan_step_failed(self, step, plan_version: int, total: int) -> None:
+        state = self._state
+        if state is not None:
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_step_failed")
+        if self._extra_hooks and self._extra_hooks.plan_step_failed:
+            await self._extra_hooks.plan_step_failed(step, plan_version, total)
+
+    async def _hook_plan_summarize_started(self, plan, plan_version: int) -> None:
+        state = self._state
+        if state is not None:
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_summarize_started")
+        if self._extra_hooks and self._extra_hooks.plan_summarize_started:
+            await self._extra_hooks.plan_summarize_started(plan, plan_version)
+
+    async def _hook_reflection_completed(self, decision, plan_version: int) -> None:
+        state = self._state
+        if state is not None:
+            self._persist_and_checkpoint(state, state.messages, "reflection_completed")
+        if self._extra_hooks and self._extra_hooks.reflection_completed:
+            await self._extra_hooks.reflection_completed(decision, plan_version)
+
+    async def _hook_plan_revised(self, previous_plan, previous_version: int, next_version: int, decision) -> None:
+        state = self._state
+        if state is not None:
+            state.plan_revisions = max(0, next_version - 1)
+            state.status = "RUNNING"
+            self._persist_and_checkpoint(state, state.messages, "plan_revised")
+        if self._extra_hooks and self._extra_hooks.plan_revised:
+            await self._extra_hooks.plan_revised(previous_plan, previous_version, next_version, decision)
 
     def _build_hooks(self) -> LoopHooks:
         return LoopHooks(
@@ -242,6 +337,14 @@ class AgentRuntime:
             before_tool=self._hook_before_tool,
             after_tool=self._hook_after_tool,
             before_final=self._hook_before_final,
+            plan_created=self._hook_plan_created,
+            plan_degraded=self._hook_plan_degraded,
+            plan_step_started=self._hook_plan_step_started,
+            plan_step_completed=self._hook_plan_step_completed,
+            plan_step_failed=self._hook_plan_step_failed,
+            plan_summarize_started=self._hook_plan_summarize_started,
+            reflection_completed=self._hook_reflection_completed,
+            plan_revised=self._hook_plan_revised,
         )
 
     # ------------------------------------------------------------------
@@ -345,6 +448,7 @@ class AgentRuntime:
             max_steps_per_step=max(2, self.settings.max_agent_steps // 2),
             context_builder=self.context_builder,
             hooks=self._build_hooks(),
+            step_hooks=self._build_plan_step_hooks(),
         )
 
         all_tool_calls: list[ToolCallRequest] = []
@@ -362,26 +466,39 @@ class AgentRuntime:
             # 每次执行使用独立的回合消息快照（基于原始 messages 拷贝），
             # 重规划时从同一起点重放，避免消息累积导致协议非法
             turn_messages: list[dict] = list(messages)
-            plan, answer, calls = await executor.execute(current_task, turn_messages, memory_context)
+            plan_version = revisions + 1
+            plan, answer, calls = await executor.execute(
+                current_task,
+                turn_messages,
+                memory_context,
+                plan_version=plan_version,
+            )
             all_tool_calls.extend(calls)
             final_answer = answer
 
-            # 反思：是否需要重规划
+            # 反思：是否需要重规划。先保留本版真实终态，再生成下一版。
+            previous_plan = [step.model_copy(deep=True) for step in plan]
             decision = reflector.reflect(current_task, plan, revisions_so_far=revisions)
+            await self._hook_reflection_completed(decision, plan_version)
             if not decision.need_replan:
                 break
+            next_version = plan_version + 1
+            # 重规划前把未成功步骤归档为 SKIPPED，避免消息历史重复执行。
+            for step in plan:
+                if step.status != "SUCCEEDED":
+                    step.status = "SKIPPED"
+            await self._hook_plan_revised(previous_plan, plan_version, next_version, decision)
             revisions += 1
             current_task = decision.revised_task or current_task
-            # 重规划前把失败的步骤标记为 SKIPPED，避免消息历史重复执行
-            for s in plan:
-                if s.status != "SUCCEEDED":
-                    s.status = "SKIPPED"
 
         # 把最后一次执行产生的消息合并回全局（会话持久化 / result.messages）
         messages[:] = turn_messages
 
         state.plan = plan
         state.plan_revisions = revisions
+        state.status = "DONE"
+        state.pending_tool_calls = []
+        self._persist_and_checkpoint(state, messages, "plan_final")
         return plan, final_answer, all_tool_calls, revisions
 
     # ------------------------------------------------------------------

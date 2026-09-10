@@ -44,6 +44,19 @@ class LoopHooks:
     after_tool: Callable[[ToolCallRequest, ToolResult, int], Awaitable[None]] | None = None
     # 即将返回最终回答之前（保存"Final Answer 前"检查点）
     before_final: Callable[[LLMResponse, int], Awaitable[None]] | None = None
+    # Plan 生命周期：规划结果已生成（plan, version, task）
+    plan_created: Callable[[list[Any], int, str], Awaitable[None]] | None = None
+    # Plan 无可执行步骤而降级为直接 ReAct（version, task, reason）
+    plan_degraded: Callable[[int, str, str], Awaitable[None]] | None = None
+    # Plan 步骤真实进入运行、完成或失败（step, version, total）
+    plan_step_started: Callable[[Any, int, int], Awaitable[None]] | None = None
+    plan_step_completed: Callable[[Any, int, int], Awaitable[None]] | None = None
+    plan_step_failed: Callable[[Any, int, int], Awaitable[None]] | None = None
+    # 所有步骤结束，准备汇总最终回答（plan, version）
+    plan_summarize_started: Callable[[list[Any], int], Awaitable[None]] | None = None
+    # 反思结论以及实际发生的版本切换
+    reflection_completed: Callable[[Any, int], Awaitable[None]] | None = None
+    plan_revised: Callable[[list[Any], int, int, Any], Awaitable[None]] | None = None
 
 
 async def run_react_loop(

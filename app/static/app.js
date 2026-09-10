@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v6 */
+/* ReAgent Web UI 前端逻辑 v8 */
 "use strict";
 
 const state = {
@@ -13,6 +13,10 @@ const state = {
   executionTools: 0,
   executionHistory: [],
   followLatest: true,
+  currentPlanVersion: null,
+  planRevisions: 0,
+  planSnapshots: new Map(),
+  planRevisionReasons: new Map(),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -133,7 +137,63 @@ function appendExecutionEvent(kind, title, detail, timestamp) {
   $("#timeline-count").textContent = String(list.querySelectorAll(".timeline-item").length);
 }
 
-function renderLivePlan(plan, revisions) {
+function clonePlanSteps(plan) {
+  return plan.map((step) => ({
+    ...step,
+    tools_hint: Array.isArray(step.tools_hint) ? [...step.tools_hint] : [],
+  }));
+}
+
+function planStateName(step) {
+  return String((step && step.status) || "PLANNED").toLowerCase();
+}
+
+function planStepIcon(stateName, index) {
+  if (stateName === "succeeded") return "●";
+  if (stateName === "failed") return "×";
+  if (stateName === "skipped") return "–";
+  if (stateName === "running") return "◌";
+  return String(index + 1);
+}
+
+function createPlanStepItem(step, index, className = "live-plan-item") {
+  const stateName = planStateName(step);
+  const item = document.createElement("div");
+  item.className = className + " " + stateName;
+  const icon = document.createElement("span");
+  icon.className = "live-plan-icon";
+  icon.textContent = planStepIcon(stateName, index);
+  icon.setAttribute("aria-label", planStatusLabel(stateName));
+  const copy = document.createElement("div");
+  copy.className = "live-plan-copy";
+  const title = document.createElement("strong");
+  title.textContent = step.description || "未命名步骤";
+  copy.appendChild(title);
+  if (step.result) {
+    const result = document.createElement("span");
+    result.textContent = step.result;
+    copy.appendChild(result);
+  } else if (Array.isArray(step.tools_hint) && step.tools_hint.length) {
+    const hint = document.createElement("span");
+    hint.textContent = "建议工具：" + step.tools_hint.join("、");
+    copy.appendChild(hint);
+  }
+  item.append(icon, copy);
+  return item;
+}
+
+function planStatusLabel(stateName) {
+  const labels = {
+    planned: "待执行",
+    running: "执行中",
+    succeeded: "已完成",
+    failed: "失败",
+    skipped: "已跳过",
+  };
+  return labels[stateName] || "状态未知";
+}
+
+function renderLivePlan(plan, revisions = 0, planVersion = null) {
   const section = $("#live-plan-section");
   const list = $("#live-plan");
   const meta = $("#live-plan-meta");
@@ -142,28 +202,81 @@ function renderLivePlan(plan, revisions) {
     clearLivePlan();
     return;
   }
+
+  const total = plan.length;
+  const terminal = plan.filter((step) => ["SUCCEEDED", "FAILED", "SKIPPED"].includes(String(step.status))).length;
+  const failed = plan.filter((step) => String(step.status) === "FAILED").length;
+  const version = Number(planVersion) || Math.max(1, Number(revisions || 0) + 1);
+  const details = ["v" + String(version), String(total) + " 步", "已处理 " + String(terminal) + "/" + String(total)];
+  if (failed) details.push(String(failed) + " 失败");
+  if (revisions) details.push("调整 " + String(revisions));
+
   section.hidden = false;
-  meta.textContent = String(plan.length) + " 步" + (revisions ? " · 调整 " + String(revisions) : "");
+  meta.textContent = details.join(" · ");
   list.replaceChildren();
-  plan.forEach((step, index) => {
-    const stateName = String(step.status || "PLANNED").toLowerCase();
-    const item = document.createElement("div");
-    item.className = "live-plan-item " + stateName;
-    const icon = document.createElement("span");
-    icon.className = "live-plan-icon";
-    icon.textContent = stateName === "succeeded" ? "●" : stateName === "failed" ? "×" : String(index + 1);
-    const copy = document.createElement("div");
-    copy.className = "live-plan-copy";
-    const title = document.createElement("strong");
-    title.textContent = step.description || "未命名步骤";
-    copy.appendChild(title);
-    if (step.result) {
-      const result = document.createElement("span");
-      result.textContent = step.result;
-      copy.appendChild(result);
-    }
-    item.append(icon, copy);
-    list.appendChild(item);
+  plan.forEach((step, index) => list.appendChild(createPlanStepItem(step, index)));
+}
+
+function setLivePlan(plan, planVersion, revisions = 0) {
+  if (!Array.isArray(plan) || !plan.length) {
+    clearLivePlan();
+    return;
+  }
+  const version = Number(planVersion) || Math.max(1, Number(revisions || 0) + 1);
+  const normalized = clonePlanSteps(plan);
+  state.planSnapshots.set(version, normalized);
+  state.currentPlanVersion = version;
+  state.planRevisions = Math.max(0, Number(revisions) || 0);
+  renderLivePlan(normalized, state.planRevisions, version);
+  renderPlanRevisionHistory();
+}
+
+function updateLivePlanStep(payload) {
+  const version = Number(payload.plan_version);
+  const step = payload.step;
+  if (!version || !step || !payload.plan_step_id) return false;
+  const plan = state.planSnapshots.get(version);
+  if (!plan) return false;
+  const index = plan.findIndex((candidate) => candidate.step_id === payload.plan_step_id);
+  if (index < 0) return false;
+  plan[index] = { ...plan[index], ...step };
+  if (state.currentPlanVersion === version) {
+    renderLivePlan(plan, state.planRevisions, version);
+  }
+  renderPlanRevisionHistory();
+  return true;
+}
+
+function recordPlanRevision(payload) {
+  const previousVersion = Number(payload.previous_plan_version);
+  if (!previousVersion) return;
+  if (Array.isArray(payload.previous_steps) && payload.previous_steps.length) {
+    state.planSnapshots.set(previousVersion, clonePlanSteps(payload.previous_steps));
+  }
+  state.planRevisionReasons.set(previousVersion, String(payload.reason || ""));
+  renderPlanRevisionHistory();
+}
+
+function renderPlanRevisionHistory() {
+  const container = $("#plan-revision-history");
+  if (!container) return;
+  container.replaceChildren();
+  const versions = [...state.planSnapshots.keys()]
+    .filter((version) => version !== state.currentPlanVersion)
+    .sort((left, right) => right - left);
+  versions.forEach((version) => {
+    const snapshot = state.planSnapshots.get(version) || [];
+    const details = document.createElement("details");
+    details.className = "plan-revision";
+    const summary = document.createElement("summary");
+    const reason = state.planRevisionReasons.get(version);
+    summary.textContent = "v" + String(version) + " · 已调整" + (reason ? "：" + reason : "");
+    details.appendChild(summary);
+    const list = document.createElement("div");
+    list.className = "plan-revision-list";
+    snapshot.forEach((step, index) => list.appendChild(createPlanStepItem(step, index, "plan-revision-step")));
+    details.appendChild(list);
+    container.appendChild(details);
   });
 }
 
@@ -171,9 +284,82 @@ function clearLivePlan() {
   const section = $("#live-plan-section");
   const list = $("#live-plan");
   const meta = $("#live-plan-meta");
+  const history = $("#plan-revision-history");
+  state.currentPlanVersion = null;
+  state.planRevisions = 0;
+  state.planSnapshots.clear();
+  state.planRevisionReasons.clear();
   if (list) list.replaceChildren();
   if (meta) meta.textContent = "0 步";
+  if (history) history.replaceChildren();
   if (section) section.hidden = true;
+}
+
+function applyPlanLifecycleEvent(type, payload, timestamp) {
+  if (type === "plan.created") {
+    const version = Number(payload.plan_version) || 1;
+    const revisions = Math.max(state.planRevisions, version - 1);
+    setLivePlan(payload.steps, version, revisions);
+    updateExecutionStatus("running", "执行中", "已生成执行计划 v" + String(version));
+    appendExecutionEvent("running", "已生成执行计划", "v" + String(version) + " · " + String(payload.total_steps || 0) + " 步", timestamp);
+    return true;
+  }
+  if (type === "plan.degraded") {
+    updateExecutionStatus("running", "执行中", "规划不可用，正在改用直接 ReAct");
+    appendExecutionEvent("warning", "计划未生成，已降级执行", payload.reason || "", timestamp);
+    return true;
+  }
+  if (type === "plan_step.started") {
+    updateLivePlanStep(payload);
+    const step = payload.step || {};
+    updateExecutionStatus("running", "执行中", "正在执行计划步骤 " + String((Number(step.order) || 0) + 1) + "/" + String(payload.total_steps || "?"));
+    appendExecutionEvent("running", "开始计划步骤：" + String(step.description || payload.plan_step_id || ""), "v" + String(payload.plan_version || "?"), timestamp);
+    return true;
+  }
+  if (type === "plan_step.completed" || type === "plan_step.failed") {
+    updateLivePlanStep(payload);
+    const step = payload.step || {};
+    const failed = type === "plan_step.failed";
+    appendExecutionEvent(
+      failed ? "error" : "success",
+      (failed ? "计划步骤失败：" : "计划步骤完成：") + String(step.description || payload.plan_step_id || ""),
+      "v" + String(payload.plan_version || "?"),
+      timestamp
+    );
+    return true;
+  }
+  if (type === "plan.summarize_started") {
+    updateExecutionStatus("running", "执行中", "计划步骤已结束，正在汇总结果");
+    appendExecutionEvent("running", "开始汇总计划结果", "v" + String(payload.plan_version || "?"), timestamp);
+    return true;
+  }
+  if (type === "reflection.completed") {
+    const needReplan = payload.need_replan === true;
+    updateExecutionStatus(
+      "running",
+      "执行中",
+      needReplan ? "反思发现问题，正在调整计划" : "计划检查完成"
+    );
+    appendExecutionEvent(
+      needReplan ? "warning" : "success",
+      needReplan ? "反思需要调整计划" : "反思确认计划结果",
+      payload.reason || "",
+      timestamp
+    );
+    return true;
+  }
+  if (type === "plan.revised") {
+    recordPlanRevision(payload);
+    updateExecutionStatus("running", "执行中", "计划已调整，正在生成 v" + String(payload.next_plan_version || "?"));
+    appendExecutionEvent(
+      "warning",
+      "计划已调整",
+      "v" + String(payload.previous_plan_version || "?") + " → v" + String(payload.next_plan_version || "?") + (payload.reason ? " · " + payload.reason : ""),
+      timestamp
+    );
+    return true;
+  }
+  return false;
 }
 
 function renderExecutionHistory(records) {
@@ -366,6 +552,7 @@ function replayExecution(record, events) {
   state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
   state.executionSteps = 0;
   state.executionTools = 0;
+  clearLivePlan();
 
   const title = $("#workspace-title");
   if (title) title.textContent = truncateForWorkspace(record.input_preview || "历史执行");
@@ -390,6 +577,8 @@ function replayExecutionEvent(event) {
   const payload = event.payload || {};
   const timestamp = event.timestamp;
   const type = event.event_type;
+
+  if (applyPlanLifecycleEvent(type, payload, timestamp)) return;
 
   if (type === "llm.started") {
     appendExecutionEvent("running", "模型开始决策", "第 " + String(payload.step || "?") + " 轮", timestamp);
@@ -419,7 +608,7 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "done") {
-    renderLivePlan(payload.plan, payload.plan_revisions);
+    setLivePlan(payload.plan, payload.plan_version, payload.plan_revisions);
     appendExecutionEvent("success", "任务已完成", "", timestamp);
     return;
   }
@@ -1613,7 +1802,7 @@ async function send() {
     assistantEl.classList.remove("streaming");
     if (finalData) {
       state.sessionId = finalData.session_id;
-      renderLivePlan(finalData.plan, finalData.plan_revisions);
+      setLivePlan(finalData.plan, finalData.plan_version, finalData.plan_revisions);
       finishExecution("success", "已完成，可查看完整工作流");
       addWorkflowPanel({
         trace: finalData.trace, trace_id: finalData.trace_id,
@@ -1669,6 +1858,8 @@ function handleFrame(frame, contentEl, onComplete) {
   let data;
   try { data = JSON.parse(dataLine.slice(5).trim()); } catch (e) { return; }
 
+  if (applyPlanLifecycleEvent(event, data, data.timestamp)) return;
+
   switch (event) {
     case "execution.started":
       startExecution(data);
@@ -1712,7 +1903,7 @@ function handleFrame(frame, contentEl, onComplete) {
       appendExecutionEvent("running", "已生成最终回答", "等待执行记录归档");
       break;
     case "done":
-      renderLivePlan(data.plan, data.plan_revisions);
+      setLivePlan(data.plan, data.plan_version, data.plan_revisions);
       onComplete(data.answer || "", data);
       break;
     case "execution.completed":

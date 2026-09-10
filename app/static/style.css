@@ -963,7 +963,7 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .timeline-detail { margin-top: 2px; overflow: hidden; color: var(--text-muted); font-size: 11px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
 .timeline-time { display: block; margin-top: 2px; color: var(--text-subtle); font-size: 10px; }
 .timeline-empty { padding: 16px 4px; color: var(--text-subtle); font-size: 12px; line-height: 1.55; }
-.live-plan { display: grid; gap: 6px; }
+.live-plan { display: grid; max-height: 218px; gap: 6px; overflow: auto; }
 .live-plan-item {
   display: grid;
   grid-template-columns: 19px minmax(0, 1fr);
@@ -977,9 +977,17 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
 .live-plan-item.succeeded .live-plan-icon { color: var(--success); }
 .live-plan-item.failed .live-plan-icon { color: var(--danger); }
 .live-plan-item.running .live-plan-icon { color: var(--info); }
+.live-plan-item.skipped .live-plan-icon { color: var(--text-subtle); }
 .live-plan-copy { min-width: 0; }
 .live-plan-copy strong { display: block; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .live-plan-copy span { display: block; overflow: hidden; margin-top: 2px; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.plan-revision-history { display: grid; max-height: 176px; gap: 6px; margin-top: 8px; overflow: auto; }
+.plan-revision { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+.plan-revision summary { padding: 7px 8px; color: var(--text-muted); cursor: pointer; font-size: 11px; font-weight: 650; line-height: 1.4; }
+.plan-revision-list { display: grid; gap: 5px; padding: 0 7px 7px; border-top: 1px solid var(--border); }
+.plan-revision-step { display: grid; grid-template-columns: 17px minmax(0, 1fr); gap: 7px; padding: 6px 0; }
+.plan-revision-step + .plan-revision-step { border-top: 1px solid var(--border); }
+.plan-revision-step .live-plan-copy strong { font-size: 11px; }
 .inspector-note { margin-top: auto; padding-top: 13px; border-top: 1px solid var(--border); }
 .inspector-note h3 { margin: 0; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
 .inspector-note p { margin: 5px 0 0; color: var(--text-subtle); font-size: 11px; line-height: 1.55; }

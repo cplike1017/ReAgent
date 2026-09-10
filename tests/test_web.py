@@ -30,6 +30,19 @@ def _make_app(tmp_path):
     return create_app(settings, redis=fake_redis)
 
 
+def _parse_sse_events(body: str) -> list[tuple[str, dict]]:
+    events: list[tuple[str, dict]] = []
+    for frame in (frame for frame in body.split("\n\n") if frame.strip()):
+        event_line = next((line for line in frame.split("\n") if line.startswith("event:")), "")
+        data_line = next((line for line in frame.split("\n") if line.startswith("data:")), "")
+        if event_line and data_line:
+            events.append((
+                event_line.split(":", 1)[1].strip(),
+                json.loads(data_line.split(":", 1)[1].strip()),
+            ))
+    return events
+
+
 def test_web_index(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         r = client.get("/")
@@ -130,6 +143,52 @@ def test_web_chat_stream_sse(tmp_path):
             assert "event: step" in body
             assert "event: tool_result" in body
             assert "event: done" in body
+
+
+def test_web_plan_streams_lifecycle_events(tmp_path):
+    """Plan 的生成、步骤与反思在最终回答前按稳定版本/步骤 ID 发出。"""
+    with TestClient(_make_app(tmp_path)) as client:
+        with client.stream(
+            "POST",
+            "/api/web/chat/stream",
+            json={"message": "查询北京和上海天气", "agent_mode": "plan"},
+        ) as response:
+            assert response.status_code == 200
+            execution_id = response.headers["x-execution-id"]
+            events = _parse_sse_events("".join(response.iter_text()))
+
+        names = [name for name, _ in events]
+        assert {
+            "plan.created",
+            "plan_step.started",
+            "plan_step.completed",
+            "plan.summarize_started",
+            "reflection.completed",
+            "done",
+        } <= set(names)
+        assert names.index("plan.created") < names.index("plan_step.started")
+        assert names.index("plan.summarize_started") < names.index("reflection.completed") < names.index("done")
+        # 子步骤是计划详情，不应把局部回答当作整轮最终回答事件。
+        assert "final" not in names
+
+        created = next(data for name, data in events if name == "plan.created")
+        assert created["plan_version"] == 1
+        assert created["total_steps"] == 2
+        step_ids = {step["step_id"] for step in created["steps"]}
+
+        started = [data for name, data in events if name == "plan_step.started"]
+        completed = [data for name, data in events if name == "plan_step.completed"]
+        assert {data["plan_step_id"] for data in started} == step_ids
+        assert {data["plan_step_id"] for data in completed} == step_ids
+        assert all(data["plan_version"] == 1 for data in started + completed)
+        assert all(data["step"]["status"] == "SUCCEEDED" for data in completed)
+
+        reflection = next(data for name, data in events if name == "reflection.completed")
+        assert reflection["need_replan"] is False
+        assert reflection["revised_task_preview"] == ""
+
+        stored = client.get(f"/api/web/executions/{execution_id}/events").json()["events"]
+        assert [event["event_type"] for event in stored] == names
 
 
 def test_web_stream_persists_execution_events(tmp_path):
