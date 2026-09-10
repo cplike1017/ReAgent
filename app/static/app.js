@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v20 */
+/* ReAgent Web UI 前端逻辑 v21 */
 "use strict";
 
 const state = {
@@ -17,6 +17,7 @@ const state = {
   followLatest: true,
   timelineFilter: "all",
   executionViewVersion: 0,
+  inspectorReturnFocus: null,
   currentPlanVersion: null,
   planRevisions: 0,
   planSnapshots: new Map(),
@@ -26,6 +27,15 @@ const state = {
 };
 
 const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
+const INSPECTOR_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "textarea:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "summary",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
@@ -2247,13 +2257,65 @@ function isInspectorCollapsed() {
     : document.body.classList.contains("inspector-collapsed");
 }
 
+function isElementFocusable(element) {
+  if (!element || element.disabled || element.getAttribute("aria-hidden") === "true") return false;
+  if (element.closest("[inert], [aria-hidden='true']")) return false;
+  return !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+}
+
+function getInspectorFocusableElements() {
+  const panel = $("#execution-panel");
+  if (!panel || isInspectorCollapsed()) return [];
+  return Array.from(panel.querySelectorAll(INSPECTOR_FOCUSABLE_SELECTOR)).filter(isElementFocusable);
+}
+
+function rememberInspectorReturnFocus() {
+  const panel = $("#execution-panel");
+  const active = document.activeElement;
+  if (!active || active === document.body || panel?.contains(active)) return;
+  state.inspectorReturnFocus = active;
+}
+
+function focusInspectorControl(collapsed, fallback) {
+  const openButton = $("#open-inspector");
+  const closeButton = $("#toggle-inspector");
+  let target = fallback || (collapsed ? state.inspectorReturnFocus || openButton : closeButton);
+  if (target && !document.contains(target)) target = collapsed ? openButton : closeButton;
+  if (!target && !collapsed) target = getInspectorFocusableElements()[0] || $("#execution-panel");
+  state.inspectorReturnFocus = collapsed ? null : state.inspectorReturnFocus;
+  if (target) requestAnimationFrame(() => target.focus());
+}
+
+function trapInspectorFocus(event) {
+  if (event.key !== "Tab" || isInspectorCollapsed() || !isCompactInspectorViewport()) return;
+  const panel = $("#execution-panel");
+  if (!panel) return;
+  const focusables = getInspectorFocusableElements();
+  if (!focusables.length) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && (!panel.contains(document.activeElement) || document.activeElement === first)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 function setInspectorCollapsed(collapsed, focusControl = false) {
   const panel = $("#execution-panel");
   const closeButton = $("#toggle-inspector");
   const openButton = $("#open-inspector");
   const backdrop = $("#inspector-backdrop");
+  const compactInspector = isCompactInspectorViewport();
+  if (focusControl && !collapsed) rememberInspectorReturnFocus();
 
-  if (isCompactInspectorViewport()) {
+  if (compactInspector) {
     document.body.classList.remove("inspector-collapsed");
     document.body.classList.toggle("inspector-expanded", !collapsed);
   } else {
@@ -2263,6 +2325,14 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
 
   if (panel) {
     panel.setAttribute("aria-hidden", String(collapsed));
+    if (compactInspector && !collapsed) {
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+    } else {
+      panel.removeAttribute("role");
+      panel.removeAttribute("aria-modal");
+    }
+    if (!panel.hasAttribute("tabindex")) panel.tabIndex = -1;
     if ("inert" in panel) panel.inert = collapsed;
   }
   if (closeButton) {
@@ -2281,8 +2351,7 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
   }
 
   if (focusControl) {
-    const target = collapsed ? openButton : closeButton;
-    if (target) requestAnimationFrame(() => target.focus());
+    focusInspectorControl(collapsed, collapsed ? null : closeButton);
   }
 }
 
@@ -3028,6 +3097,7 @@ function bindEvents() {
   }
   $("#navigation-backdrop")?.addEventListener("click", () => setNavigationOpen(false, true));
   document.addEventListener("keydown", (event) => {
+    trapInspectorFocus(event);
     if (event.key !== "Escape") return;
     if (document.body.classList.contains("navigation-open")) {
       setNavigationOpen(false, true);

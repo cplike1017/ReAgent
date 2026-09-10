@@ -131,6 +131,10 @@ def test_web_index(tmp_path):
         assert "canOpenExecutionHistory" in script
         assert "advanceExecutionViewVersion" in script
         assert "canChangeSession" in script
+        assert "trapInspectorFocus" in script
+        assert "inspectorReturnFocus" in script
+        assert "INSPECTOR_FOCUSABLE_SELECTOR" in script
+        assert "aria-modal" in script
         style = client.get("/style.css").text
         assert ".timeline-detail-expand" in style
         assert ".execution-history-item:disabled" in style
