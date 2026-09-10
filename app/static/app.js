@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v21 */
+/* ReAgent Web UI 前端逻辑 v22 */
 "use strict";
 
 const state = {
@@ -1132,6 +1132,8 @@ async function fetchAllExecutionEvents(executionId) {
 
 async function openExecutionHistory(executionId) {
   // 单一工作台状态不能同时承载两条活动流；锁定可避免晚到事件污染历史回放。
+  // 当前运行已经有 SSE 订阅时，重复点击只保留当前视图，不能使订阅版本失效。
+  if (state.streaming && executionId === state.executionId) return;
   if (!canOpenExecutionHistory(executionId)) return;
   const viewVersion = advanceExecutionViewVersion();
   try {

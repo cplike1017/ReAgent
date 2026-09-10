@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -73,6 +73,9 @@ state.executionId = "execution-current";
 state.streaming = true;
 assert.strictEqual(canOpenExecutionHistory("execution-current"), true);
 assert.strictEqual(canOpenExecutionHistory("execution-other"), false, "another live stream cannot overwrite the selected run");
+const activeViewVersion = state.executionViewVersion;
+openExecutionHistory("execution-current");
+assert.strictEqual(state.executionViewVersion, activeViewVersion, "reselecting the active stream must not invalidate its subscription");
 state.streaming = false;
 assert.strictEqual(canOpenExecutionHistory("execution-other"), true);
 const firstViewVersion = advanceExecutionViewVersion();
