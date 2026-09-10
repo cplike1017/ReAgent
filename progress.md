@@ -113,3 +113,8 @@
 - The primary checkout was found back on `main` after the implementation commit. Its tracked files were preserved unchanged, and a separate worktree was created for `codex/frontend-execution-ux` at `D:\CodeSource\harness\agent-runtime-execution-ux`.
 - Started the implementation from that worktree on `http://127.0.0.1:8000`, loading the already configured root `.env` into the process without printing its values.
 - Final live-service check passed: `GET /health` returned HTTP 200, the page references `/app.js?v=5`, and the served JavaScript contains `function finalizeRun`.
+
+## Publication completed (2026-09-11)
+
+- After the Fine-grained personal access token was configured, `git push -u origin codex/frontend-execution-ux` completed successfully.
+- The local branch now tracks `origin/codex/frontend-execution-ux`; no force push or update to `main` was performed.
