@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v18 */
+/* ReAgent Web UI 前端逻辑 v19 */
 "use strict";
 
 const state = {
@@ -74,6 +74,7 @@ function startExecution(data) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || null;
   resetExecutionEventCursor();
+  renderExecutionHistory(state.executionHistory);
   if (data.session_id) state.sessionId = data.session_id;
   state.executionStartedAt = Date.now();
   state.executionSteps = 0;
@@ -978,6 +979,10 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
   return true;
 }
 
+function canOpenExecutionHistory(executionId) {
+  return !state.streaming || executionId === state.executionId;
+}
+
 function renderExecutionHistory(records) {
   state.executionHistory = Array.isArray(records) ? records : [];
   const container = $("#execution-history");
@@ -1000,6 +1005,9 @@ function renderExecutionHistory(records) {
     item.className = "execution-history-item";
     item.dataset.executionId = record.execution_id;
     if (record.execution_id === state.executionId) item.classList.add("active");
+    const selectable = canOpenExecutionHistory(record.execution_id);
+    item.disabled = !selectable;
+    item.title = selectable ? "回放此执行记录" : "当前运行仍在接续；结束后可切换其他执行记录";
 
     const title = document.createElement("span");
     title.className = "execution-history-title";
@@ -1011,7 +1019,9 @@ function renderExecutionHistory(records) {
       + (record.created_at ? " · " + formatStoredTime(record.created_at) : "");
 
     item.append(title, meta);
-    item.addEventListener("click", () => openExecutionHistory(record.execution_id));
+    item.addEventListener("click", () => {
+      if (canOpenExecutionHistory(record.execution_id)) openExecutionHistory(record.execution_id);
+    });
     container.appendChild(item);
   });
 }
@@ -1080,6 +1090,8 @@ async function fetchAllExecutionEvents(executionId) {
 }
 
 async function openExecutionHistory(executionId) {
+  // 单一工作台状态不能同时承载两条活动流；锁定可避免晚到事件污染历史回放。
+  if (!canOpenExecutionHistory(executionId)) return;
   try {
     const response = await fetch("/api/web/executions/" + encodeURIComponent(executionId));
     if (!response.ok) throw new Error("执行记录读取失败");
@@ -1100,8 +1112,7 @@ async function resumeExecutionEvents(record, afterSeq) {
   if (state.streaming) return;
   const controller = new AbortController();
   state.abortCtrl = controller;
-  state.streaming = true;
-  $("#send").disabled = true;
+  setStreaming(true);
   const stop = $("#stop");
   if (stop) {
     stop.disabled = false;
@@ -1174,6 +1185,7 @@ function replayExecution(record, events) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = record.execution_id;
   state.sessionId = record.session_id || state.sessionId;
+  renderExecutionHistory(state.executionHistory);
   state.executionStartedAt = Date.parse(record.started_at || record.created_at) || Date.now();
   state.executionSteps = 0;
   state.executionTools = 0;
@@ -2642,7 +2654,10 @@ async function send() {
     }
     setConnStatus(true);
     const executionId = resp.headers.get("X-Execution-ID");
-    if (executionId) state.executionId = executionId;
+    if (executionId) {
+      state.executionId = executionId;
+      renderExecutionHistory(state.executionHistory);
+    }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -2836,8 +2851,10 @@ function handleFrame(frame, contentEl, onComplete) {
 
 function setStreaming(v) {
   state.streaming = v;
-  $("#send").disabled = v;
+  const send = $("#send");
+  if (send) send.disabled = v;
   if (!v) state.abortCtrl = null;
+  renderExecutionHistory(state.executionHistory);
 }
 
 async function stopStreaming() {

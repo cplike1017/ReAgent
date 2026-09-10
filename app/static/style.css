@@ -932,6 +932,8 @@ button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus
   border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
   background: var(--accent-soft);
 }
+.execution-history-item:disabled { cursor: not-allowed; opacity: .55; }
+.execution-history-item:disabled:hover { border-color: var(--border); background: var(--surface-subtle); }
 .execution-history-title,
 .execution-history-meta {
   display: block;

@@ -23,13 +23,13 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\ninit\(\);\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory };\n";
 
 const sandbox = { Date, JSON, Map, Math, Number, Set };
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -69,6 +69,12 @@ assert.strictEqual(hasTimelineDetail(""), false);
 assert.strictEqual(timelineDetailNeedsExpansion("简短详情"), false);
 assert.strictEqual(timelineDetailNeedsExpansion("x".repeat(97)), true);
 assert.strictEqual(timelineDetailNeedsExpansion("第一行\n第二行"), true);
+state.executionId = "execution-current";
+state.streaming = true;
+assert.strictEqual(canOpenExecutionHistory("execution-current"), true);
+assert.strictEqual(canOpenExecutionHistory("execution-other"), false, "another live stream cannot overwrite the selected run");
+state.streaming = false;
+assert.strictEqual(canOpenExecutionHistory("execution-other"), true);
 '''
 
     result = subprocess.run(

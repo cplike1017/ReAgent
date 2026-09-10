@@ -128,7 +128,10 @@ def test_web_index(tmp_path):
         assert "lastExecutionSeq" in script
         assert "setTimelineFilter" in script
         assert "timelineDetailNeedsExpansion" in script
-        assert ".timeline-detail-expand" in client.get("/style.css").text
+        assert "canOpenExecutionHistory" in script
+        style = client.get("/style.css").text
+        assert ".timeline-detail-expand" in style
+        assert ".execution-history-item:disabled" in style
 
 
 def test_web_capabilities(tmp_path):
