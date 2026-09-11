@@ -182,6 +182,158 @@ def test_showing_timeline_redraws_compact_call_edges(tmp_path):
     assert 'drawCompactCallLines($("#compact-call-graph"))' in inspector_tab
 
 
+def test_reopening_inspector_redraws_visible_graphs(tmp_path):
+    """Graphs first measured while hidden must be rebuilt after the panel reopens."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    collapsed = script.split("function setInspectorCollapsed(collapsed", 1)[1].split(
+        "function setNavigationOpen", 1
+    )[0]
+    assert "redrawVisibleInspectorGraphs" in collapsed
+    assert "if (!collapsed)" in collapsed
+    assert "requestAnimationFrame" in collapsed
+
+
+def test_returning_to_execution_section_redraws_visible_graphs(tmp_path):
+    """Outer Inspector navigation must redraw graphs hidden under Files or Settings."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    section = script.split("function setInspectorSection(section)", 1)[1].split(
+        "function setInspectorTab", 1
+    )[0]
+    assert 'if (section === "execution")' in section
+    assert "requestAnimationFrame(redrawVisibleInspectorGraphs)" in section
+
+
+def test_compact_navigation_is_an_accessible_exclusive_drawer(tmp_path):
+    """The Sessions drawer traps focus, makes its background inert, and excludes Inspector."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    navigation = script.split("function setNavigationOpen(open", 1)[1].split(
+        "function esc", 1
+    )[0]
+    inspector = script.split("function setInspectorCollapsed(collapsed", 1)[1].split(
+        "function setNavigationOpen", 1
+    )[0]
+    assert "function trapNavigationFocus(event)" in script
+    assert "if (trapNavigationFocus(event)) return;" in script
+    assert "state.navigationReturnFocus" in navigation
+    assert 'navigation.setAttribute("role", "dialog")' in navigation
+    assert 'navigation.setAttribute("aria-modal", "true")' in navigation
+    assert "setDrawerBackgroundInert" in navigation
+    assert "setInspectorCollapsed(true" in navigation
+    assert "setNavigationOpen(false" in inspector
+    assert 'id="navigation-backdrop"' in page and 'tabindex="-1"' in page
+
+
+def test_search_result_restores_focus_before_changing_workspace(tmp_path):
+    """Activating a result must not strand focus inside the now-hidden search dialog."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    search = script.split("function renderLoadedSearchResults()", 1)[1].split(
+        "function setInspectorSection", 1
+    )[0]
+    assert "closeLoadedSearch(false);" in search
+    assert "focusPrimaryWorkspace" in search
+    assert "function focusPrimaryWorkspace(view)" in script
+
+
+def test_search_falls_back_from_a_closing_drawer_and_blocks_modal_stacking(tmp_path):
+    """Search gets a stable return target and cannot stack over the Agent dialog."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    open_search = script.split("function openLoadedSearch()", 1)[1].split(
+        "function trapLoadedSearchFocus", 1
+    )[0]
+    keydown = script.split('document.addEventListener("keydown", (event) => {', 1)[1].split(
+        'const inspectorViewport = window.matchMedia', 1
+    )[0]
+    assert '$("#primary-navigation")?.contains(returnFocus)' in open_search
+    assert 'state.searchReturnFocus =' in open_search and '$("#toggle-navigation")' in open_search
+    assert 'if (!$("#agent-dialog")?.hidden)' in keydown
+    assert "openLoadedSearch();" in keydown
+
+
+def test_session_drawer_actions_restore_focus_when_they_close_it(tmp_path):
+    """Opening a session or New Task from the compact drawer restores its launcher."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    open_session = script.split("async function openSession(sessionId)", 1)[1].split(
+        "async function openExecutionHistory", 1
+    )[0]
+    new_session = script.split("function newSession()", 1)[1].split(
+        "/* ================= 消息渲染", 1
+    )[0]
+    for body in (open_session, new_session):
+        assert "const navigationWasOpen" in body
+        assert "setNavigationOpen(false, navigationWasOpen)" in body
+
+
+def test_capability_and_agent_loaders_isolate_http_failures(tmp_path):
+    """One failed endpoint preserves successful resource lists and reports the failed scope."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    capabilities = script.split("async function loadCapabilities()", 1)[1].split(
+        "/* ================= 子 Agent 档案", 1
+    )[0]
+    agents = script.split("async function loadAgents()", 1)[1].split(
+        "async function unregisterAgent", 1
+    )[0]
+    assert "Promise.allSettled" in capabilities
+    assert "state.resources[result.config.key]" in capabilities
+    assert "部分能力读取失败" in capabilities
+    assert "responses.some" not in capabilities
+    assert "if (!response.ok)" in agents
+    assert "setResourceFeedback" in agents
+    assert "return false" in agents
+
+
+def test_agent_management_uses_a_modal_and_local_feedback(tmp_path):
+    """CRUD controls belong to the Agents workspace and never fabricate chat execution cards."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    register = script.split("async function registerAgent()", 1)[1].split(
+        "function showAgentError", 1
+    )[0]
+    unregister = script.split("async function unregisterAgent(name)", 1)[1].split(
+        "async function registerAgent", 1
+    )[0]
+    assert 'id="agent-dialog"' in page
+    assert 'role="dialog"' in page
+    assert 'aria-modal="true"' in page
+    assert "function openAgentDialog()" in script
+    assert "function closeAgentDialog(" in script
+    assert "function trapAgentDialogFocus(event)" in script
+    assert "setResourceFeedback" in register
+    assert "setResourceFeedback" in unregister
+    assert "addToolMsg" not in register
+    assert "addToolMsg" not in unregister
+    assert "addErrorMsg" not in register
+    assert "addErrorMsg" not in unregister
+
+
+def test_saved_pane_widths_survive_an_initial_compact_viewport(tmp_path):
+    """Widths loaded on tablet are retained and applied after widening to desktop."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    binding = script.split("function bindPaneResizers()", 1)[1].split(
+        "function isInspectorCollapsed", 1
+    )[0]
+    assert "uiState.paneWidths[name] = savedWidth" in binding
+    assert "if (!isCompactInspectorViewport()) setPaneWidth" in binding
+
+
 def test_inspector_files_mirror_and_settings_are_real_local_controls(tmp_path):
     """Outer Inspector tabs consume shared file state and local preferences."""
     with TestClient(_make_app(tmp_path)) as client:
@@ -291,3 +443,4 @@ def test_desktop_inspector_starts_beside_workspace_header(tmp_path):
     assert "margin-right: calc(var(--inspector-width) + var(--pane-resizer-size))" in desktop
     assert 'body[data-primary-view="chat"] .execution-panel' in desktop
     assert "margin-top: -86px" in desktop
+    assert 'body[data-primary-view="chat"] .workspace { overflow: visible; }' in desktop

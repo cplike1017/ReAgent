@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v27 */
+/* ReAgent Web UI 前端逻辑 v28 */
 "use strict";
 
 const state = {
@@ -22,6 +22,8 @@ const state = {
   timelineFilter: "all",
   executionViewVersion: 0,
   inspectorReturnFocus: null,
+  navigationReturnFocus: null,
+  agentDialogReturnFocus: null,
   currentPlanVersion: null,
   planRevisions: 0,
   planSnapshots: new Map(),
@@ -121,6 +123,11 @@ function setPrimaryView(view) {
   renderResourceWorkspace();
 }
 
+function focusPrimaryWorkspace(view) {
+  const target = view === "chat" ? $("#workspace-title") : $("#resource-workspace-title");
+  if (target) requestAnimationFrame(() => target.focus({ preventScroll: true }));
+}
+
 function setLocalFeedback(selector, kind, message) {
   const element = $(selector);
   if (!element) return;
@@ -215,6 +222,15 @@ function renderResourceWorkspace() {
 
   if (view === "agents") {
     summary.textContent = String(resources.agents.length) + " 个可用 Agent 档案";
+    const actions = document.createElement("div");
+    actions.className = "resource-workspace-actions";
+    const register = document.createElement("button");
+    register.type = "button";
+    register.className = "resource-primary-action";
+    register.textContent = "注册 Agent";
+    register.addEventListener("click", openAgentDialog);
+    actions.appendChild(register);
+    content.appendChild(actions);
     appendResourceSection(content, "Agent Profiles", resources.agents.map((agent) => createResourceCard(
       agent.name,
       agent.description,
@@ -310,7 +326,10 @@ function openLoadedSearch() {
   const dialog = $("#search-dialog");
   const input = $("#search-input");
   if (!dialog || !input || !dialog.hidden) return;
-  state.searchReturnFocus = document.activeElement;
+  const returnFocus = document.activeElement;
+  state.searchReturnFocus = $("#primary-navigation")?.contains(returnFocus)
+    ? $("#toggle-navigation")
+    : returnFocus;
   setNavigationOpen(false);
   dialog.hidden = false;
   document.body.classList.add("search-open");
@@ -383,10 +402,12 @@ function renderLoadedSearchResults() {
           closeLoadedSearch(false);
           setPrimaryView("chat");
           void openSession(entry.sessionId);
+          focusPrimaryWorkspace("chat");
           return;
         }
         closeLoadedSearch(false);
         setPrimaryView(entry.view);
+        focusPrimaryWorkspace(entry.view);
       });
       section.appendChild(item);
     });
@@ -407,6 +428,7 @@ function setInspectorSection(section) {
     panel.hidden = panel.dataset.inspectorSectionPanel !== section;
   });
   if (section === "files") renderInspectorFiles();
+  if (section === "execution") requestAnimationFrame(redrawVisibleInspectorGraphs);
 }
 
 function setInspectorTab(tab) {
@@ -2240,43 +2262,53 @@ function replayExecutionEvent(event) {
 
 /* ================= 能力列表 ================= */
 async function loadCapabilities() {
-  try {
-    const responses = await Promise.all([
-      fetch("/api/web/tools"),
-      fetch("/api/web/skills"),
-      fetch("/api/web/mcp"),
-    ]);
-    if (responses.some((response) => !response.ok)) {
-      throw new Error("能力接口返回失败");
+  const configs = [
+    {
+      key: "tools", label: "工具", url: "/api/web/tools", listKey: "tools", selector: "#tool-list", count: "#tool-count",
+      toListItem: (tool) => ({ text: tool.name + (tool.risk_level !== "low" ? ` [${tool.risk_level}]` : ""), title: tool.description }),
+    },
+    {
+      key: "skills", label: "技能", url: "/api/web/skills", listKey: "skills", selector: "#skill-list", count: "#skill-count",
+      toListItem: (skill) => ({ text: skill.name, title: skill.description }),
+    },
+    {
+      key: "mcp", label: "MCP", url: "/api/web/mcp", listKey: "servers", selector: "#mcp-list", count: "#mcp-count",
+      toListItem: (server) => ({ text: `${server.name} (${server.tool_count})`, title: `transport: ${server.transport}` }),
+    },
+  ];
+  const settled = await Promise.allSettled(configs.map(async (config) => {
+    const response = await fetch(config.url);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
+    return { config, items: Array.isArray(data[config.listKey]) ? data[config.listKey] : [] };
+  }));
+  const results = settled.map((outcome, index) => outcome.status === "fulfilled"
+    ? { ...outcome.value, ok: true }
+    : { config: configs[index], ok: false, error: outcome.reason });
+  const failures = [];
+  results.forEach((result) => {
+    if (!result.ok) {
+      failures.push(result.config.label + "：" + (result.error?.message || "读取失败"));
+      return;
     }
-    const [tools, skills, mcp] = await Promise.all(responses.map((response) => response.json()));
-    state.resources.tools = Array.isArray(tools.tools) ? tools.tools : [];
-    state.resources.skills = Array.isArray(skills.skills) ? skills.skills : [];
-    state.resources.mcp = Array.isArray(mcp.servers) ? mcp.servers : [];
-    renderList("#tool-list", (tools.tools || []).map((t) => ({
-      text: t.name + (t.risk_level !== "low" ? ` [${t.risk_level}]` : ""),
-      title: t.description,
-    })));
-    $("#tool-count").textContent = tools.count;
-    renderList("#skill-list", (skills.skills || []).map((s) => ({
-      text: s.name, title: s.description,
-    })));
-    $("#skill-count").textContent = skills.count;
-    renderList("#mcp-list", (mcp.servers || []).map((s) => ({
-      text: `${s.name} (${s.tool_count})`, title: `transport: ${s.transport}`,
-    })));
-    $("#mcp-count").textContent = mcp.count;
-    renderResourceWorkspace();
-    return true;
-  } catch (e) {
+    state.resources[result.config.key] = result.items;
+    renderList(result.config.selector, result.items.map(result.config.toListItem));
+    $(result.config.count).textContent = String(result.items.length);
+  });
+  renderResourceWorkspace();
+  if (failures.length) {
+    setResourceFeedback("error", "部分能力读取失败，已保留其余成功数据：" + failures.join("；"));
     return false;
   }
+  return true;
 }
 
 /* ================= 子 Agent 档案（动态注册） ================= */
 async function loadAgents() {
   try {
-    const data = await fetch("/api/web/agents").then((r) => r.json());
+    const response = await fetch("/api/web/agents");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
     state.resources.agents = Array.isArray(data.agents) ? data.agents : [];
     const ul = $("#agent-list");
     ul.innerHTML = "";
@@ -2288,7 +2320,7 @@ async function loadAgents() {
         <span class="si-icon">${a.builtin ? "📦" : "🧩"}</span>
         <span class="si-name">${esc(a.name)}</span>
         <span class="si-badge">${a.builtin ? "内置" : "自定义"}</span>
-        ${a.builtin ? "" : `<span class="si-del" data-unregister="${esc(a.name)}" title="注销档案">✕</span>`}
+        ${a.builtin ? "" : `<button class="si-del" type="button" data-unregister="${esc(a.name)}" aria-label="注销 ${esc(a.name)} 档案" title="注销档案">✕</button>`}
       `;
       li.querySelector("[data-unregister]")?.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2297,7 +2329,11 @@ async function loadAgents() {
       ul.appendChild(li);
     });
     renderResourceWorkspace();
-  } catch (e) { /* 忽略 */ }
+    return true;
+  } catch (e) {
+    setResourceFeedback("error", "Agent 档案读取失败：" + e.message);
+    return false;
+  }
 }
 
 async function unregisterAgent(name) {
@@ -2308,11 +2344,76 @@ async function unregisterAgent(name) {
       const err = await r.json().catch(() => ({}));
       throw new Error(err.detail || r.statusText);
     }
-    loadAgents();
-    addToolMsg({ tool: "unregister_agent", arguments: { name }, success: true, data: "已注销" });
+    const refreshed = await loadAgents();
+    setPrimaryView("agents");
+    setResourceFeedback(refreshed ? "success" : "error", refreshed
+      ? `已注销 Agent 档案「${name}」。`
+      : `已注销 Agent 档案「${name}」，但列表刷新失败。`);
   } catch (e) {
-    addErrorMsg("注销失败: " + e.message);
+    setPrimaryView("agents");
+    setResourceFeedback("error", "注销失败：" + e.message);
   }
+}
+
+function setAgentDialogBackgroundInert(inert) {
+  [$("#global-header"), $(".app-shell")].forEach((element) => {
+    if (element && "inert" in element) element.inert = inert;
+  });
+}
+
+function getAgentDialogFocusableElements() {
+  const dialog = $("#agent-dialog");
+  if (!dialog || dialog.hidden) return [];
+  return Array.from(dialog.querySelectorAll(INSPECTOR_FOCUSABLE_SELECTOR)).filter(isElementFocusable);
+}
+
+function openAgentDialog() {
+  const dialog = $("#agent-dialog");
+  if (!dialog || !dialog.hidden) return;
+  state.agentDialogReturnFocus = document.activeElement;
+  if (!$("#search-dialog")?.hidden) closeLoadedSearch(false);
+  dialog.hidden = false;
+  document.body.classList.add("agent-dialog-open");
+  setAgentDialogBackgroundInert(true);
+  hideAgentError();
+  requestAnimationFrame(() => $("#agent-name")?.focus());
+}
+
+function closeAgentDialog(restoreFocus = true) {
+  const dialog = $("#agent-dialog");
+  if (!dialog || dialog.hidden) return;
+  dialog.hidden = true;
+  document.body.classList.remove("agent-dialog-open");
+  setAgentDialogBackgroundInert(false);
+  setDrawerBackgroundInert();
+  hideAgentError();
+  let target = state.agentDialogReturnFocus;
+  if (!target || !document.contains(target)) {
+    target = $('[data-primary-view="agents"]') || $("#add-agent-btn");
+  }
+  state.agentDialogReturnFocus = null;
+  if (restoreFocus && target) requestAnimationFrame(() => target.focus());
+}
+
+function trapAgentDialogFocus(event) {
+  const dialog = $("#agent-dialog");
+  if (event.key !== "Tab" || !dialog || dialog.hidden) return false;
+  const focusables = getAgentDialogFocusableElements();
+  if (!focusables.length) {
+    event.preventDefault();
+    dialog.focus();
+    return true;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && (!dialog.contains(document.activeElement) || document.activeElement === first)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (!dialog.contains(document.activeElement) || document.activeElement === last)) {
+    event.preventDefault();
+    first.focus();
+  }
+  return true;
 }
 
 async function registerAgent() {
@@ -2335,18 +2436,21 @@ async function registerAgent() {
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(data.detail || r.statusText);
-    $("#agent-form").style.display = "none";
     $("#agent-name").value = $("#agent-desc").value = $("#agent-prompt").value = $("#agent-tools").value = "";
     hideAgentError();
-    loadAgents();
-    addToolMsg({ tool: "register_agent", arguments: { name }, success: true, data: "注册成功，可立即用于编排" });
+    const refreshed = await loadAgents();
+    closeAgentDialog();
+    setPrimaryView("agents");
+    setResourceFeedback(refreshed ? "success" : "error", refreshed
+      ? `已注册 Agent 档案「${name}」，可立即用于编排。`
+      : `已注册 Agent 档案「${name}」，但列表刷新失败。`);
   } catch (e) {
     showAgentError("注册失败: " + e.message);
   }
 }
 
-function showAgentError(msg) { const el = $("#agent-error"); el.textContent = msg; el.style.display = "block"; }
-function hideAgentError() { const el = $("#agent-error"); el.style.display = "none"; }
+function showAgentError(msg) { const el = $("#agent-error"); el.textContent = msg; el.hidden = false; }
+function hideAgentError() { const el = $("#agent-error"); el.hidden = true; el.textContent = ""; }
 
 function renderList(sel, items) {
   const ul = $(sel);
@@ -2548,7 +2652,8 @@ async function openSession(sessionId) {
   if (!canChangeSession()) return;
   const viewVersion = advanceExecutionViewVersion();
   state.sessionId = sessionId;
-  setNavigationOpen(false);
+  const navigationWasOpen = document.body.classList.contains("navigation-open");
+  setNavigationOpen(false, navigationWasOpen);
   // 高亮
   $$("#session-list .session-item").forEach((el) => el.classList.toggle("active", el.dataset.sessionId === sessionId));
   // 加载消息
@@ -2873,7 +2978,8 @@ function newSession() {
   }
   updateExecutionStatus("idle", "准备就绪", "提交任务后，执行过程会实时显示在右侧。");
   renderExecutionMetrics();
-  setNavigationOpen(false);
+  const navigationWasOpen = document.body.classList.contains("navigation-open");
+  setNavigationOpen(false, navigationWasOpen);
   $("#messages").innerHTML = renderWelcome();
   $$("#session-list .session-item").forEach((el) => el.classList.remove("active"));
   // 清空编排记录列表
@@ -3438,7 +3544,10 @@ function bindPaneResizers() {
   try {
     const saved = JSON.parse(localStorage.getItem(PANE_WIDTH_STORAGE_KEY) || "{}");
     Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
-      if (Number.isFinite(Number(saved[name]))) setPaneWidth(name, Number(saved[name]), false);
+      const savedWidth = Number(saved[name]);
+      if (!Number.isFinite(savedWidth)) return;
+      uiState.paneWidths[name] = savedWidth;
+      if (!isCompactInspectorViewport()) setPaneWidth(name, savedWidth, false);
     });
   } catch (error) { /* 忽略 */ }
 
@@ -3552,6 +3661,26 @@ function trapInspectorFocus(event) {
   }
 }
 
+function setDrawerBackgroundInert() {
+  const navigationOpen = isMobileNavigationViewport() && document.body.classList.contains("navigation-open");
+  const inspectorOpen = isCompactInspectorViewport() && document.body.classList.contains("inspector-expanded");
+  const setInert = (selector, inert) => {
+    const element = $(selector);
+    if (element && "inert" in element) element.inert = inert;
+  };
+  setInert("#global-header", navigationOpen || inspectorOpen);
+  setInert("#app-rail", navigationOpen || inspectorOpen);
+  setInert(".main", navigationOpen);
+  setInert("#primary-navigation", inspectorOpen || (isMobileNavigationViewport() && !navigationOpen));
+  [".chat-header", "#chat-view", "#resource-workspace"].forEach((selector) => setInert(selector, inspectorOpen));
+}
+
+function redrawVisibleInspectorGraphs() {
+  if (isInspectorCollapsed()) return;
+  if (uiState.inspectorTab === "agents") renderLiveOrchestrations();
+  else if (uiState.inspectorTab === "timeline") renderCompactCalls();
+}
+
 function setInspectorCollapsed(collapsed, focusControl = false) {
   const panel = $("#execution-panel");
   const closeButton = $("#toggle-inspector");
@@ -3559,6 +3688,9 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
   const backdrop = $("#inspector-backdrop");
   const compactInspector = isCompactInspectorViewport();
   if (focusControl && !collapsed) rememberInspectorReturnFocus();
+  if (compactInspector && !collapsed && document.body.classList.contains("navigation-open")) {
+    setNavigationOpen(false);
+  }
 
   if (compactInspector) {
     document.body.classList.remove("inspector-collapsed");
@@ -3592,8 +3724,11 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
   }
   if (backdrop) {
     backdrop.setAttribute("aria-hidden", String(collapsed));
-    backdrop.tabIndex = collapsed ? -1 : 0;
+    backdrop.tabIndex = -1;
   }
+  setDrawerBackgroundInert();
+
+  if (!collapsed) requestAnimationFrame(redrawVisibleInspectorGraphs);
 
   if (focusControl) {
     focusInspectorControl(collapsed, collapsed ? null : closeButton);
@@ -3605,6 +3740,8 @@ function setNavigationOpen(open, focusControl = false) {
   const navigation = $("#primary-navigation");
   const backdrop = $("#navigation-backdrop");
   const active = isMobileNavigationViewport() && open;
+  if (focusControl && active) state.navigationReturnFocus = document.activeElement;
+  if (active && !isInspectorCollapsed()) setInspectorCollapsed(true);
   document.body.classList.toggle("navigation-open", active);
   if (toggle) {
     toggle.title = active ? "关闭会话导航" : "打开会话导航";
@@ -3613,17 +3750,50 @@ function setNavigationOpen(open, focusControl = false) {
   }
   if (navigation) {
     navigation.setAttribute("aria-hidden", String(!active && isMobileNavigationViewport()));
+    if (active) {
+      navigation.setAttribute("role", "dialog");
+      navigation.setAttribute("aria-modal", "true");
+    } else {
+      navigation.removeAttribute("role");
+      navigation.removeAttribute("aria-modal");
+    }
     if ("inert" in navigation) navigation.inert = !active && isMobileNavigationViewport();
   }
   if (backdrop) {
     backdrop.setAttribute("aria-hidden", String(!active));
-    backdrop.tabIndex = active ? 0 : -1;
+    backdrop.tabIndex = -1;
   }
+  setDrawerBackgroundInert();
   if (focusControl && active && navigation) {
     requestAnimationFrame(() => navigation.querySelector("button, summary, [href]")?.focus());
-  } else if (focusControl && toggle) {
-    requestAnimationFrame(() => toggle.focus());
+  } else if (focusControl) {
+    let target = state.navigationReturnFocus;
+    if (!target || !document.contains(target)) target = toggle;
+    state.navigationReturnFocus = null;
+    if (target) requestAnimationFrame(() => target.focus());
   }
+}
+
+function trapNavigationFocus(event) {
+  const navigation = $("#primary-navigation");
+  if (event.key !== "Tab" || !isMobileNavigationViewport()
+      || !document.body.classList.contains("navigation-open") || !navigation) return false;
+  const focusables = Array.from(navigation.querySelectorAll(INSPECTOR_FOCUSABLE_SELECTOR)).filter(isElementFocusable);
+  if (!focusables.length) {
+    event.preventDefault();
+    navigation.focus();
+    return true;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && (!navigation.contains(document.activeElement) || document.activeElement === first)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (!navigation.contains(document.activeElement) || document.activeElement === last)) {
+    event.preventDefault();
+    first.focus();
+  }
+  return true;
 }
 
 function esc(s) {
@@ -4474,13 +4644,18 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
+      if (!$("#agent-dialog")?.hidden) return;
       openLoadedSearch();
       return;
     }
+    if (trapAgentDialogFocus(event)) return;
     if (trapLoadedSearchFocus(event)) return;
+    if (trapNavigationFocus(event)) return;
     trapInspectorFocus(event);
     if (event.key !== "Escape") return;
-    if (!$("#search-dialog")?.hidden) {
+    if (!$("#agent-dialog")?.hidden) {
+      closeAgentDialog();
+    } else if (!$("#search-dialog")?.hidden) {
       closeLoadedSearch();
     } else if (document.body.classList.contains("navigation-open")) {
       setNavigationOpen(false, true);
@@ -4554,20 +4729,16 @@ function bindEvents() {
     });
   });
 
-  // 档案注册表单
+  // Agent 档案管理弹窗
   const addAgentBtn = $("#add-agent-btn");
-  if (addAgentBtn) {
-    addAgentBtn.addEventListener("click", () => {
-      const form = $("#agent-form");
-      form.style.display = form.style.display === "none" ? "block" : "none";
-      if (form.style.display === "block") $("#agent-name").focus();
-    });
-  }
-  $("#agent-save")?.addEventListener("click", registerAgent);
-  $("#agent-cancel")?.addEventListener("click", () => {
-    $("#agent-form").style.display = "none";
-    hideAgentError();
+  addAgentBtn?.addEventListener("click", openAgentDialog);
+  $("#agent-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void registerAgent();
   });
+  $("#agent-cancel")?.addEventListener("click", () => closeAgentDialog());
+  $("#agent-dialog-close")?.addEventListener("click", () => closeAgentDialog());
+  $("#agent-dialog-backdrop")?.addEventListener("click", () => closeAgentDialog());
 }
 
 /* ================= 文件列表 ================= */

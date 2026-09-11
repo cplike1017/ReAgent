@@ -299,7 +299,7 @@ def test_web_resource_workspace_reuses_runtime_resource_endpoints(tmp_path):
     assert 'id="resource-summary"' in page
     assert 'id="resource-content"' in page
     assert "function renderResourceWorkspace()" in script
-    assert "state.resources.tools" in script
+    assert "state.resources[result.config.key]" in script
     assert "state.resources.files" in script
     assert "renderResourceWorkspace();" in script.split("function setPrimaryView", 1)[1].split("function setInspectorSection", 1)[0]
 
@@ -353,8 +353,8 @@ def test_web_static_bundle_versions_and_accessibility_foundations_are_current(tm
         page = client.get("/").text
         style = client.get("/style.css").text
 
-    assert 'href="/style.css?v=27"' in page
-    assert 'src="/app.js?v=27"' in page
+    assert 'href="/style.css?v=28"' in page
+    assert 'src="/app.js?v=28"' in page
     assert "button:focus-visible" in style
     assert "@media (prefers-reduced-motion: reduce)" in style
 
