@@ -6,7 +6,10 @@
 2. 字段名与环境变量名大小写不敏感一一对应（如 database_url <-> DATABASE_URL）。
 3. 测试中可以直接构造 Settings(**kwargs) 覆盖，不影响全局。
 """
+import json
+import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -18,6 +21,8 @@ class Settings(BaseSettings):
     app_name: str = "ReAgent"
     # 运行环境：dev | test | prod（暂用于日志与默认值区分）
     environment: str = "dev"
+    # Web 设置页写入的持久化覆盖文件。Docker 部署应把它放在持久卷中。
+    runtime_config_file: str = "./data/runtime-settings.json"
 
     # ---------- LLM ----------
     # provider: auto | openai | stub
@@ -200,7 +205,85 @@ class Settings(BaseSettings):
         return "stub"
 
 
+# Web 设置页允许持久化的最小配置面。密钥只允许写入，不通过 API 回显。
+RUNTIME_EDITABLE_FIELDS = frozenset({
+    "llm_provider",
+    "llm_base_url",
+    "llm_api_key",
+    "llm_model",
+    "embedding_provider",
+    "embedding_base_url",
+    "embedding_api_key",
+    "embedding_model",
+    "tavily_api_key",
+    "github_token",
+    "orchestrator_enabled",
+    "orchestrator_planner_strategy",
+    "orchestrator_max_parallel",
+    "orchestrator_max_depth",
+})
+
+
+def read_runtime_overrides(settings: Settings) -> dict:
+    """读取设置页覆盖值；文件损坏时保留环境变量配置并继续启动。"""
+    path = Path(settings.runtime_config_file)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {key: value for key, value in payload.items() if key in RUNTIME_EDITABLE_FIELDS}
+
+
+def _validate_runtime_settings(settings: Settings) -> None:
+    if settings.llm_provider == "openai" and not settings.llm_base_url.strip():
+        raise ValueError("OpenAI-compatible Provider 需要配置 LLM Base URL")
+    if settings.embedding_provider == "openai" and not settings.embedding_base_url.strip():
+        raise ValueError("OpenAI-compatible Embedding 需要配置 Embedding Base URL")
+
+
+def load_runtime_settings(settings: Settings) -> Settings:
+    """把设置页持久化覆盖合并到环境配置，并通过 Settings 重新校验。"""
+    overrides = read_runtime_overrides(settings)
+    if not overrides:
+        return settings
+    try:
+        effective = Settings(**(settings.model_dump() | overrides))
+        _validate_runtime_settings(effective)
+        return effective
+    except (TypeError, ValueError):
+        return settings
+
+
+def save_runtime_settings(settings: Settings, updates: dict) -> Settings:
+    """原子保存提交字段，未提交的覆盖值（尤其密钥）保持不变。"""
+    unexpected = set(updates) - RUNTIME_EDITABLE_FIELDS
+    if unexpected:
+        raise ValueError(f"不支持的配置项: {', '.join(sorted(unexpected))}")
+    overrides = read_runtime_overrides(settings)
+    overrides.update(updates)
+    effective = Settings(**(settings.model_dump() | overrides))
+    _validate_runtime_settings(effective)
+
+    path = Path(settings.runtime_config_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp")
+    temporary.write_text(
+        json.dumps(overrides, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return effective
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """获取全局单例配置（lru_cache 保证进程内只解析一次 .env）。"""
-    return Settings()
+    return load_runtime_settings(Settings())

@@ -20,6 +20,8 @@
 - 中间：请求、回答和工具卡片；工具卡片以稳定 `tool_call_id` 对应结果，避免同名调用互相覆盖。
 - 右侧：选中的 execution 的时间线、Plan、子 Agent、上下文事实、Trace 与执行历史；可按需收起或在窄屏打开检查器。窄屏检查器展开时会锁定键盘焦点，并在关闭后恢复到打开前的位置。
 
+Settings 同时提供浏览器偏好和服务端运行配置。聊天模型、Embedding、Tavily / GitHub 密钥及多 Agent 参数保存到 `RUNTIME_CONFIG_FILE`，需要重启 API 与 Worker 才应用到新任务；密钥只可覆盖，不会通过读取接口或密码框回显。Docker Compose 将该文件和自定义 Agent 档案都放在 `/data` 持久卷中。
+
 ## 一次执行的真实状态
 
 | 状态 / 事件 | 含义 | 界面行为 |
@@ -60,6 +62,8 @@ execution 的事件先写入 SQLite，再通过 SSE 发布。断开当前浏览�
 | `GET /api/web/executions/{execution_id}/stream?after_seq=N` | 从指定序号回放并续接活动执行。 |
 | `POST /api/web/executions/{execution_id}/cancel` | 幂等请求取消排队或运行中的直连任务。 |
 | `GET /api/web/executions/{execution_id}/outputs/{output_id}` | 按需读取经过脱敏和大小限制后的完整工具/子 Agent 输出。 |
+| `GET /api/web/settings` | 获取可公开配置、密钥是否已配置及当前子 Agent 状态。 |
+| `PATCH /api/web/settings` | 持久化受控运行配置；响应不包含密钥原文。 |
 
 实时事件只携带安全预览；完整输出走最后一个按需接口。输出在存储前递归脱敏，并受 `EXECUTION_OUTPUT_MAX_BYTES` 上限控制，超过上限时会明确标记截断。
 
@@ -79,3 +83,4 @@ execution 的事件先写入 SQLite，再通过 SSE 发布。断开当前浏览�
 - 页面展示整段最终回答；没有真实提供方增量时不会伪造逐字流式输出。
 - 没有模型提供方 usage 时，无法推导成本或编造 token；界面仅显示实际返回的字段。
 - execution 和输出查询沿用当前单用户部署边界；多租户部署前需要补充身份认证、授权范围和保留策略。
+- Settings 写接口同样沿用单用户同源部署边界；面向公网或多租户部署前必须增加管理身份认证与授权。

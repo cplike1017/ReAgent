@@ -24,9 +24,14 @@ import redis.asyncio as aioredis
 from app.agent.runtime import AgentRuntime
 from app.checkpoint.repository import SQLiteCheckpointRepository
 from app.config import Settings, get_settings
+from app.llm.client import create_llm_client
+from app.orchestrator.registry import ProfileRegistry
+from app.orchestrator.repository import SQLiteOrchestrationRepository
+from app.orchestrator.runner import OrchestratorRunner
 from app.queue.consumer import process_job
 from app.queue.producer import RedisJobQueue
 from app.session.repository import SQLiteSessionRepository
+from app.tools.builtin import build_default_registry
 from app.tracing.recorder import TraceRecorder
 
 
@@ -34,13 +39,34 @@ def build_runtime_factory(settings: Settings, recorder: TraceRecorder | None = N
     """返回 () -> AgentRuntime 的工厂：每个 Job 共享同一 SQLite。"""
     session_repo = SQLiteSessionRepository(settings.database_url)
     checkpoint_repo = SQLiteCheckpointRepository(settings.database_url)
+    profile_registry = ProfileRegistry(settings) if settings.orchestrator_enabled else None
+    orchestration_repo = (
+        SQLiteOrchestrationRepository(settings.database_url)
+        if settings.orchestrator_enabled
+        else None
+    )
 
     def factory() -> AgentRuntime:
+        llm = create_llm_client(settings)
+        registry = build_default_registry()
+        orchestrator = None
+        if settings.orchestrator_enabled:
+            orchestrator = OrchestratorRunner(
+                llm=llm,
+                registry=registry,
+                settings=settings,
+                recorder=recorder,
+                profile_registry=profile_registry,
+                repository=orchestration_repo,
+            )
         return AgentRuntime(
+            llm=llm,
+            registry=registry,
             settings=settings,
             session_repo=session_repo,
             checkpoint_repo=checkpoint_repo,
             recorder=recorder,
+            orchestrator=orchestrator,
         )
 
     return factory

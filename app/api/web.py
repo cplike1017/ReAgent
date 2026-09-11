@@ -13,7 +13,7 @@ Web UI 路由（Stage 12）。
 """
 import asyncio
 import json
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent.react_loop import LoopHooks
+from app.config import RUNTIME_EDITABLE_FIELDS, load_runtime_settings, save_runtime_settings
 from app.errors import AgentError
 from app.execution.models import ExecutionStatus
 from app.orchestrator.events import OrchestrationHooks
@@ -1143,6 +1144,97 @@ async def web_tools(request: Request) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 运行时配置：密钥仅可写，保存后由 API / Worker 重启加载
+# ---------------------------------------------------------------------------
+class WebSettingsUpdate(BaseModel):
+    """设置页允许修改的受控配置项。未提交字段保持原值，空密钥表示清除。"""
+
+    llm_provider: Literal["auto", "openai", "stub"] | None = None
+    llm_base_url: str | None = Field(default=None, max_length=2048)
+    llm_api_key: str | None = Field(default=None, max_length=8192)
+    llm_model: str | None = Field(default=None, min_length=1, max_length=200)
+    embedding_provider: Literal["auto", "openai", "stub"] | None = None
+    embedding_base_url: str | None = Field(default=None, max_length=2048)
+    embedding_api_key: str | None = Field(default=None, max_length=8192)
+    embedding_model: str | None = Field(default=None, min_length=1, max_length=200)
+    tavily_api_key: str | None = Field(default=None, max_length=8192)
+    github_token: str | None = Field(default=None, max_length=8192)
+    orchestrator_enabled: bool | None = None
+    orchestrator_planner_strategy: Literal["llm", "stub"] | None = None
+    orchestrator_max_parallel: int | None = Field(default=None, ge=1, le=16)
+    orchestrator_max_depth: int | None = Field(default=None, ge=1, le=8)
+
+
+def _settings_response(settings, runtime, *, restart_required: bool) -> dict:
+    orchestrator = runtime.orchestrator
+    profile_count = len(orchestrator.profile_registry.all()) if orchestrator is not None else 0
+    return {
+        "settings": {
+            "llm": {
+                "provider": settings.llm_provider,
+                "base_url": settings.llm_base_url,
+                "model": settings.llm_model,
+                "api_key_configured": bool(settings.llm_api_key),
+            },
+            "embedding": {
+                "provider": settings.embedding_provider,
+                "base_url": settings.embedding_base_url,
+                "model": settings.embedding_model,
+                "api_key_configured": bool(settings.embedding_api_key),
+            },
+            "tools": {
+                "tavily_api_key_configured": bool(settings.tavily_api_key),
+                "github_token_configured": bool(settings.github_token),
+            },
+            "orchestration": {
+                "enabled": settings.orchestrator_enabled,
+                "planner_strategy": settings.orchestrator_planner_strategy,
+                "max_parallel": settings.orchestrator_max_parallel,
+                "max_depth": settings.orchestrator_max_depth,
+            },
+        },
+        "runtime": {
+            "active_model": getattr(runtime.llm, "model", settings.llm_model),
+            "orchestrator_available": orchestrator is not None,
+            "agent_profile_count": profile_count,
+        },
+        "restart_required": restart_required,
+    }
+
+
+@router.get("/settings")
+async def web_settings(request: Request) -> dict:
+    """读取待生效配置和当前运行时状态，永不返回密钥原文。"""
+    runtime = _get_runtime(request)
+    active = request.app.state.settings
+    desired = load_runtime_settings(active)
+    restart_required = any(
+        getattr(desired, field) != getattr(active, field)
+        for field in RUNTIME_EDITABLE_FIELDS
+    )
+    return _settings_response(desired, runtime, restart_required=restart_required)
+
+
+@router.patch("/settings")
+async def web_settings_update(req: WebSettingsUpdate, request: Request) -> dict:
+    """持久化设置覆盖；为避免中断在途任务，统一在服务重启后应用。"""
+    updates = {
+        field: getattr(req, field)
+        for field in req.model_fields_set
+        if field in RUNTIME_EDITABLE_FIELDS and getattr(req, field) is not None
+    }
+    if not updates:
+        raise HTTPException(status_code=400, detail="没有可保存的配置项")
+    try:
+        desired = save_runtime_settings(request.app.state.settings, updates)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"配置保存失败: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _settings_response(desired, _get_runtime(request), restart_required=True)
+
+
+# ---------------------------------------------------------------------------
 # 多 Agent 编排（Stage 12）：直接编排入口 + 子 Agent 档案列表
 # ---------------------------------------------------------------------------
 class WebOrchestrateRequest(BaseModel):
@@ -1186,7 +1278,12 @@ async def web_agents(request: Request) -> dict:
     """列出可用的子 Agent 档案（内置 + 动态注册）。"""
     runtime = _get_runtime(request)
     if runtime.orchestrator is None:
-        return {"agents": [], "count": 0}
+        return {
+            "agents": [],
+            "count": 0,
+            "enabled": False,
+            "reason": "多 Agent 编排已关闭，请在设置中启用后重启服务。",
+        }
     reg = runtime.orchestrator.profile_registry
     return {
         "agents": [
@@ -1200,6 +1297,8 @@ async def web_agents(request: Request) -> dict:
             for p in reg.all()
         ],
         "count": len(reg.all()),
+        "enabled": True,
+        "reason": "",
     }
 
 

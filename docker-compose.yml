@@ -24,6 +24,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:////data/agent.db
       TRACE_FILE: /data/traces.jsonl
+      RUNTIME_CONFIG_FILE: /data/runtime-settings.json
+      AGENT_PROFILES_FILE: /data/agent_profiles.json
     env_file:
       - path: .env
         required: false
@@ -40,6 +42,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: sqlite:////data/agent.db
       TRACE_FILE: /data/traces.jsonl
+      RUNTIME_CONFIG_FILE: /data/runtime-settings.json
+      AGENT_PROFILES_FILE: /data/agent_profiles.json
     env_file:
       - path: .env
         required: false

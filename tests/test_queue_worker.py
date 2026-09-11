@@ -14,7 +14,7 @@ from app.main import create_app
 from app.queue.consumer import process_job
 from app.queue.models import Job, JobStatus
 from app.queue.producer import RedisJobQueue, utc_now
-from app.worker.worker import run_worker
+from app.worker.worker import build_runtime_factory, run_worker
 
 
 @pytest.fixture
@@ -86,6 +86,30 @@ async def test_idempotency_different_request_ids(queue):
 # ---------------------------------------------------------------------------
 # Worker 处理
 # ---------------------------------------------------------------------------
+def test_worker_runtime_registers_delegate_when_orchestration_is_enabled(settings):
+    runtime = build_runtime_factory(
+        settings.model_copy(update={"orchestrator_enabled": True})
+    )()
+
+    assert runtime.orchestrator is not None
+    assert runtime.registry.get("delegate").name == "delegate"
+    assert runtime.orchestrator.profile_registry.names()[:4] == [
+        "researcher",
+        "analyst",
+        "writer",
+        "generalist",
+    ]
+
+
+def test_worker_runtime_omits_delegate_when_orchestration_is_disabled(settings):
+    runtime = build_runtime_factory(
+        settings.model_copy(update={"orchestrator_enabled": False})
+    )()
+
+    assert runtime.orchestrator is None
+    assert all(tool.name != "delegate" for tool in runtime.registry.all())
+
+
 async def test_process_job_success(queue, runtime):
     job = await queue.enqueue(_make_job("req_ok", "查询北京天气", session_id="session_ok"))
     done = await process_job(queue, lambda: runtime, job)

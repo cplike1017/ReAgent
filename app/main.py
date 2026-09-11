@@ -24,7 +24,7 @@ from app.api.routes import router
 from app.api.web import router as web_router
 from app.checkpoint.repository import SQLiteCheckpointRepository
 from app.execution.repository import SQLiteExecutionRepository
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, load_runtime_settings
 from app.llm.client import create_llm_client
 from app.mcp.client import MCPClientManager
 from app.memory.store import MemoryStore
@@ -93,7 +93,7 @@ def build_web_runtime(settings: Settings, recorder: TraceRecorder) -> AgentRunti
 
 
 def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
-    settings = settings or get_settings()
+    settings = load_runtime_settings(settings) if settings is not None else get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -141,7 +141,16 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
             mcp_task = asyncio.create_task(_prewarm_mcp())
 
         print(f"[api] Redis 队列已连接: {settings.redis_url}", flush=True)
-        print(f"[api] Web 运行时就绪（mode={settings.agent_mode}, memory={settings.memory_enabled}）", flush=True)
+        profile_count = (
+            len(app.state.runtime.orchestrator.profile_registry.all())
+            if app.state.runtime.orchestrator is not None
+            else 0
+        )
+        print(
+            f"[api] Web 运行时就绪（mode={settings.agent_mode}, memory={settings.memory_enabled}, "
+            f"orchestrator={settings.orchestrator_enabled}, agent_profiles={profile_count}）",
+            flush=True,
+        )
         yield
         if mcp_task is not None and not mcp_task.done():
             mcp_task.cancel()

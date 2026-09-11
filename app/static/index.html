@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=28">
+<link rel="stylesheet" href="/style.css?v=29">
 </head>
 <body data-theme="light">
 <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -390,12 +390,42 @@
         </section>
         <section id="inspector-settings-section" class="inspector-top-panel" data-inspector-section-panel="settings" hidden>
           <div class="inspector-section inspector-heading"><h3>Settings</h3></div>
-          <p class="inspector-support-copy">仅调整当前浏览器的阅读偏好；不修改模型、密钥或运行时配置。</p>
+          <p class="inspector-support-copy">管理浏览器偏好和服务端运行配置。密钥只写不回显；运行配置保存后需重启 API 与 Worker。</p>
           <div class="local-settings">
             <button id="settings-theme-toggle" class="settings-row" type="button"><span>界面主题</span><strong>切换深浅主题</strong></button>
             <label class="settings-row" for="settings-default-tab"><span>默认 Inspector Tab</span><select id="settings-default-tab"><option value="timeline">Timeline</option><option value="trace">Trace</option><option value="agents">Agents</option><option value="context">Context</option></select></label>
             <button id="clear-local-preferences" class="settings-row danger" type="button"><span>本地偏好</span><strong>恢复默认</strong></button>
           </div>
+          <form id="runtime-settings-form" class="runtime-settings-form">
+            <fieldset>
+              <legend>对话模型</legend>
+              <label><span>Provider</span><select id="settings-llm-provider"><option value="auto">Auto</option><option value="openai">OpenAI-compatible</option><option value="stub">Stub</option></select></label>
+              <label><span>Base URL</span><input id="settings-llm-base-url" type="url" autocomplete="url" placeholder="https://api.example.com/v1"></label>
+              <label><span>Model</span><input id="settings-llm-model" type="text" maxlength="200" required autocomplete="off"></label>
+              <label><span>API Key</span><input id="settings-llm-api-key" type="password" maxlength="8192" autocomplete="new-password" placeholder="留空则不修改"></label>
+            </fieldset>
+            <fieldset>
+              <legend>Embedding</legend>
+              <label><span>Provider</span><select id="settings-embedding-provider"><option value="auto">Auto</option><option value="openai">OpenAI-compatible</option><option value="stub">Stub</option></select></label>
+              <label><span>Base URL</span><input id="settings-embedding-base-url" type="url" autocomplete="url" placeholder="https://api.example.com/v1"></label>
+              <label><span>Model</span><input id="settings-embedding-model" type="text" maxlength="200" required autocomplete="off"></label>
+              <label><span>API Key</span><input id="settings-embedding-api-key" type="password" maxlength="8192" autocomplete="new-password" placeholder="留空则不修改"></label>
+            </fieldset>
+            <fieldset>
+              <legend>工具密钥</legend>
+              <label><span>Tavily API Key</span><input id="settings-tavily-api-key" type="password" maxlength="8192" autocomplete="new-password" placeholder="留空则不修改"></label>
+              <label><span>GitHub Token</span><input id="settings-github-token" type="password" maxlength="8192" autocomplete="new-password" placeholder="留空则不修改"></label>
+            </fieldset>
+            <fieldset>
+              <legend>子 Agent 编排</legend>
+              <label class="runtime-settings-check"><span>启用编排器</span><input id="settings-orchestrator-enabled" type="checkbox"></label>
+              <label><span>Planner</span><select id="settings-orchestrator-strategy"><option value="llm">LLM</option><option value="stub">Stub</option></select></label>
+              <label><span>最大并行数</span><input id="settings-orchestrator-parallel" type="number" min="1" max="16" required></label>
+              <label><span>最大嵌套深度</span><input id="settings-orchestrator-depth" type="number" min="1" max="8" required></label>
+              <p id="settings-runtime-status" class="runtime-settings-status">正在读取运行时状态…</p>
+            </fieldset>
+            <button id="settings-save-runtime" class="runtime-settings-save" type="submit">保存运行配置</button>
+          </form>
           <p id="settings-feedback" class="local-feedback" role="status" aria-live="polite" hidden></p>
         </section>
       </aside>
@@ -405,6 +435,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=28"></script>
+<script src="/app.js?v=29"></script>
 </body>
 </html>

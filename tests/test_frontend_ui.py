@@ -334,21 +334,49 @@ def test_saved_pane_widths_survive_an_initial_compact_viewport(tmp_path):
     assert "if (!isCompactInspectorViewport()) setPaneWidth" in binding
 
 
-def test_inspector_files_mirror_and_settings_are_real_local_controls(tmp_path):
-    """Outer Inspector tabs consume shared file state and local preferences."""
+def test_inspector_settings_manage_runtime_configuration_without_echoing_secrets(tmp_path):
+    """Settings expose editable runtime fields while secrets remain write-only."""
     with TestClient(_make_app(tmp_path)) as client:
         page = client.get("/").text
         script = client.get("/app.js").text
+        style = client.get("/style.css").text
 
     assert 'id="inspector-file-list"' in page
     assert 'data-inspector-upload data-upload-trigger' in page
     assert 'id="settings-theme-toggle"' in page
     assert 'id="settings-default-tab"' in page
+    assert 'id="runtime-settings-form"' in page
+    assert 'id="settings-llm-provider"' in page
+    assert 'id="settings-llm-base-url"' in page
+    assert 'id="settings-llm-model"' in page
+    assert 'id="settings-llm-api-key"' in page
+    assert 'id="settings-tavily-api-key"' in page
+    assert 'id="settings-orchestrator-enabled"' in page
+    assert 'id="settings-save-runtime"' in page
     assert 'id="clear-local-preferences"' in page
     assert 'id="settings-feedback"' in page
     assert "function renderInspectorFiles()" in script
     assert "function bindLocalSettings()" in script
+    assert "async function loadRuntimeSettings()" in script
+    assert "async function saveRuntimeSettings(" in script
+    assert 'fetch("/api/web/settings"' in script
+    assert 'method: "PATCH"' in script
+    assert "api_key_configured" in script
+    assert ".runtime-settings-form" in style
     assert "reagent-default-inspector-tab" in script
+    assert "仅调整前端阅读偏好，不修改模型、密钥或运行时配置" not in page
+
+
+def test_mobile_navigation_keeps_horizontal_swipe_without_visible_scrollbar(tmp_path):
+    """The compact rail may scroll to all destinations without covering UI with browser chrome."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    mobile = style.split("@media (max-width: 719px)", 1)[1]
+    rail = mobile.split(".app-rail {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto" in rail
+    assert "scrollbar-width: none" in rail
+    assert ".app-rail::-webkit-scrollbar { display: none; }" in mobile
 
 
 def test_historical_orchestration_uses_real_dependencies_in_visible_inspector(tmp_path):

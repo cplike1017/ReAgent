@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v28 */
+/* ReAgent Web UI 前端逻辑 v29 */
 "use strict";
 
 const state = {
@@ -43,8 +43,10 @@ const state = {
     skills: [],
     mcp: [],
     agents: [],
+    agentStatus: { enabled: true, reason: "" },
     files: [],
   },
+  runtimeSettings: null,
 };
 
 const uiState = {
@@ -61,7 +63,7 @@ const PRIMARY_VIEW_COPY = Object.freeze({
   mcp: ["MCP", "查看当前已连接的 MCP Server。"],
   traces: ["Traces", "查看当前会话的执行记录与编排历史。"],
   files: ["Files", "查看全局沙箱文件；文件不会自动成为任务附件。"],
-  settings: ["Settings", "仅调整前端阅读偏好，不修改模型、密钥或运行时配置。"],
+  settings: ["Settings", "管理界面偏好、模型、密钥和子 Agent 编排配置。"],
 });
 
 const SESSION_METADATA_STORAGE_KEY = "reagent-session-metadata-v1";
@@ -120,6 +122,10 @@ function setPrimaryView(view) {
   if (contextTitle) contextTitle.textContent = title;
   if (resourceTitle) resourceTitle.textContent = title;
   if (resourceDescription) resourceDescription.textContent = description;
+  if (view === "settings") {
+    setInspectorSection("settings");
+    setInspectorCollapsed(false, true);
+  }
   renderResourceWorkspace();
 }
 
@@ -235,7 +241,7 @@ function renderResourceWorkspace() {
       agent.name,
       agent.description,
       (agent.builtin ? "内置" : "自定义") + " · 最多 " + String(agent.max_steps || 0) + " 步 · " + (Array.isArray(agent.allowed_tools) ? agent.allowed_tools.join("、") || "无工具" : "全部工具"),
-    )), "当前运行时未启用子 Agent 档案。");
+    )), resources.agentStatus.reason || "当前运行时没有可用的子 Agent 档案。");
     return;
   }
 
@@ -278,11 +284,41 @@ function renderResourceWorkspace() {
   }
 
   if (view === "settings") {
+    const payload = state.runtimeSettings;
+    const config = payload?.settings;
+    const runtime = payload?.runtime;
     const theme = document.body.dataset.theme === "dark" ? "深色" : "浅色";
-    summary.textContent = "仅包含本地阅读偏好";
+    summary.textContent = config ? "运行配置与本地偏好" : "运行配置读取中";
+    const openEditor = () => {
+      setInspectorSection("settings");
+      setInspectorCollapsed(false, true);
+      requestAnimationFrame(() => $("#settings-llm-model")?.focus());
+    };
+    appendResourceSection(content, "Configuration", config ? [
+      createResourceCard(
+        config.llm.model,
+        config.llm.provider + (config.llm.base_url ? " · " + config.llm.base_url : ""),
+        config.llm.api_key_configured ? "模型密钥已配置" : "模型密钥未配置",
+        openEditor,
+      ),
+      createResourceCard(
+        "子 Agent 编排",
+        runtime?.orchestrator_available
+          ? String(runtime.agent_profile_count || 0) + " 个 Agent 档案正在运行"
+          : (config.orchestration.enabled ? "等待重启后启用" : "当前已关闭"),
+        config.orchestration.planner_strategy + " planner · 并行 " + String(config.orchestration.max_parallel),
+        openEditor,
+      ),
+      createResourceCard(
+        "工具密钥",
+        "Tavily " + (config.tools.tavily_api_key_configured ? "已配置" : "未配置") + " · GitHub " + (config.tools.github_token_configured ? "已配置" : "未配置"),
+        "密钥只写不回显",
+        openEditor,
+      ),
+    ] : [], "正在从服务端读取配置。");
     appendResourceSection(content, "Local preferences", [createResourceCard(
       "界面主题",
-      "当前为" + theme + "主题；可使用顶部按钮切换。模型、密钥与运行时配置不会在此页面修改。",
+      "当前为" + theme + "主题；可使用顶部按钮切换。",
       "浏览器本地显示偏好",
     )], "");
     return;
@@ -487,6 +523,105 @@ function renderInspectorFiles() {
   });
 }
 
+function setRuntimeSettingsValue(selector, value) {
+  const element = $(selector);
+  if (element && value !== undefined && value !== null) element.value = String(value);
+}
+
+function setSecretSettingsState(selector, configured) {
+  const element = $(selector);
+  if (!element) return;
+  element.value = "";
+  element.placeholder = configured ? "已配置；留空则不修改" : "未配置；留空则不修改";
+}
+
+function applyRuntimeSettings(payload) {
+  state.runtimeSettings = payload;
+  const config = payload?.settings;
+  if (!config) return;
+  setRuntimeSettingsValue("#settings-llm-provider", config.llm.provider);
+  setRuntimeSettingsValue("#settings-llm-base-url", config.llm.base_url);
+  setRuntimeSettingsValue("#settings-llm-model", config.llm.model);
+  setSecretSettingsState("#settings-llm-api-key", config.llm.api_key_configured);
+  setRuntimeSettingsValue("#settings-embedding-provider", config.embedding.provider);
+  setRuntimeSettingsValue("#settings-embedding-base-url", config.embedding.base_url);
+  setRuntimeSettingsValue("#settings-embedding-model", config.embedding.model);
+  setSecretSettingsState("#settings-embedding-api-key", config.embedding.api_key_configured);
+  setSecretSettingsState("#settings-tavily-api-key", config.tools.tavily_api_key_configured);
+  setSecretSettingsState("#settings-github-token", config.tools.github_token_configured);
+  const enabled = $("#settings-orchestrator-enabled");
+  if (enabled) enabled.checked = config.orchestration.enabled === true;
+  setRuntimeSettingsValue("#settings-orchestrator-strategy", config.orchestration.planner_strategy);
+  setRuntimeSettingsValue("#settings-orchestrator-parallel", config.orchestration.max_parallel);
+  setRuntimeSettingsValue("#settings-orchestrator-depth", config.orchestration.max_depth);
+  const runtime = payload.runtime || {};
+  const status = $("#settings-runtime-status");
+  if (status) {
+    status.textContent = runtime.orchestrator_available
+      ? "运行中：" + String(runtime.agent_profile_count || 0) + " 个 Agent 档案 · 模型 " + String(runtime.active_model || config.llm.model)
+      : (config.orchestration.enabled ? "编排器将在重启后启用。" : "编排器当前已关闭。");
+  }
+  renderResourceWorkspace();
+}
+
+async function loadRuntimeSettings() {
+  try {
+    const response = await fetch("/api/web/settings");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "HTTP " + String(response.status));
+    applyRuntimeSettings(data);
+    if (data.restart_required) {
+      setLocalFeedback("#settings-feedback", "success", "已有运行配置等待重启后生效。");
+    }
+    return true;
+  } catch (error) {
+    setLocalFeedback("#settings-feedback", "error", "运行配置读取失败：" + error.message);
+    return false;
+  }
+}
+
+async function saveRuntimeSettings(event) {
+  event?.preventDefault();
+  const button = $("#settings-save-runtime");
+  const payload = {
+    llm_provider: $("#settings-llm-provider").value,
+    llm_base_url: $("#settings-llm-base-url").value.trim(),
+    llm_model: $("#settings-llm-model").value.trim(),
+    embedding_provider: $("#settings-embedding-provider").value,
+    embedding_base_url: $("#settings-embedding-base-url").value.trim(),
+    embedding_model: $("#settings-embedding-model").value.trim(),
+    orchestrator_enabled: $("#settings-orchestrator-enabled").checked,
+    orchestrator_planner_strategy: $("#settings-orchestrator-strategy").value,
+    orchestrator_max_parallel: Number($("#settings-orchestrator-parallel").value),
+    orchestrator_max_depth: Number($("#settings-orchestrator-depth").value),
+  };
+  [
+    ["llm_api_key", "#settings-llm-api-key"],
+    ["embedding_api_key", "#settings-embedding-api-key"],
+    ["tavily_api_key", "#settings-tavily-api-key"],
+    ["github_token", "#settings-github-token"],
+  ].forEach(([field, selector]) => {
+    const value = $(selector).value.trim();
+    if (value) payload[field] = value;
+  });
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch("/api/web/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "HTTP " + String(response.status));
+    applyRuntimeSettings(data);
+    setLocalFeedback("#settings-feedback", "success", "运行配置已安全保存；请重启 API 与 Worker 使其生效。");
+  } catch (error) {
+    setLocalFeedback("#settings-feedback", "error", "运行配置保存失败：" + error.message);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function bindLocalSettings() {
   const defaultTab = $("#settings-default-tab");
   let savedDefault = "timeline";
@@ -503,6 +638,7 @@ function bindLocalSettings() {
     });
   }
   $("#settings-theme-toggle")?.addEventListener("click", () => $("#theme-toggle")?.click());
+  $("#runtime-settings-form")?.addEventListener("submit", saveRuntimeSettings);
   $("#clear-local-preferences")?.addEventListener("click", () => {
     try {
       ["reagent-theme", "reagent-timeline-filter", PANE_WIDTH_STORAGE_KEY, DEFAULT_INSPECTOR_TAB_STORAGE_KEY, SESSION_METADATA_STORAGE_KEY]
@@ -555,7 +691,7 @@ function syncSessionNavigationState() {
 async function init() {
   renderWelcome();
   state.sessionMetadata = loadSessionMetadata();
-  const [capabilitiesReady] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
+  const [capabilitiesReady] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents(), loadRuntimeSettings()]);
   // 连接状态必须来自真实 API 响应，不能在失败后被无条件覆盖为“已连接”。
   setConnStatus(capabilitiesReady === true);
   bindEvents();
@@ -2310,6 +2446,10 @@ async function loadAgents() {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
     state.resources.agents = Array.isArray(data.agents) ? data.agents : [];
+    state.resources.agentStatus = {
+      enabled: data.enabled !== false,
+      reason: typeof data.reason === "string" ? data.reason : "",
+    };
     const ul = $("#agent-list");
     ul.innerHTML = "";
     (data.agents || []).forEach((a) => {

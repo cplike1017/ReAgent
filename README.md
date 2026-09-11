@@ -87,6 +87,8 @@ EMBEDDING_MODEL=your-embedding-model
 
 完整的可选配置（MCP、天气、SMTP、工具策略、Trace 等）见 [.env.example](.env.example)。
 
+也可以在 Web UI 的 **Settings** 中修改聊天模型、Embedding、Tavily / GitHub 密钥和多 Agent 编排参数。密钥输入为只写字段，读取接口只返回“是否已配置”；保存值写入 `RUNTIME_CONFIG_FILE`，重启 API 与 Worker 后生效。
+
 ## 架构
 
 ```mermaid
@@ -159,6 +161,8 @@ curl -X POST http://127.0.0.1:8000/api/web/chat \
 | `POST /api/web/chat/stream` | SSE 流式运行 Agent。 |
 | `GET /api/web/sessions` | 查看 Web UI 会话。 |
 | `POST /api/web/orchestrate` | 运行多 Agent 编排。 |
+| `GET /api/web/settings` | 查看可公开的运行配置与子 Agent 启用状态（不回显密钥）。 |
+| `PATCH /api/web/settings` | 保存模型、密钥与编排配置，重启后生效。 |
 | `POST /api/chat` | 将任务写入 Redis 队列，返回 `job_id`。 |
 | `GET /api/jobs/{job_id}` | 查询异步任务状态。 |
 | `GET /api/traces/{trace_id}` | 查询 Trace 调用树。 |
@@ -177,7 +181,17 @@ docker compose up --build
 docker compose up --scale worker=3
 ```
 
-Compose 会在存在时读取根目录 `.env`，并将 SQLite 数据和 Trace 写入名为 `agent_data` 的 Docker volume。
+Compose 会在存在时读取根目录 `.env`，并将 SQLite、Trace、Settings 覆盖和自定义子 Agent 档案写入名为 `agent_data` 的 Docker volume。
+
+服务器执行 `git pull` 只会更新宿主机源码，不会替换正在运行的容器。更新后请重建并重启：
+
+```bash
+docker compose up -d --build --force-recreate
+docker compose exec api python -c "from app.config import get_settings; s=get_settings(); print(s.agent_version, s.orchestrator_enabled, s.agent_profiles_file)"
+curl http://127.0.0.1:8000/api/web/agents
+```
+
+最后一个接口默认应返回 4 个内置档案；若 `enabled=false`，在 Settings 中启用编排并重启服务。自定义档案现在固定保存到 `/data/agent_profiles.json`，重建容器不会再丢失。
 
 ## 项目结构
 
