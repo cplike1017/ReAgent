@@ -23,7 +23,7 @@ const vm = require("vm");
 
 let source = fs.readFileSync("app/static/app.js", "utf8");
 source = source.replace(/\r?\ninit\(\);\r?\nloadFiles\(\);\s*$/, "\n");
-source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession };\n";
+source += "\nglobalThis.__executionEventTest = { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession, resetRunSummaryFacts, recordModelUsage, summarizeUsage, recordToolFact, summarizeToolFacts };\n";
 
 const stopButton = { disabled: false, style: {} };
 const runStateBadge = { className: "", textContent: "" };
@@ -40,7 +40,7 @@ const sandbox = {
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox, { filename: "app/static/app.js" });
 
-const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession } = sandbox.__executionEventTest;
+const { state, resetExecutionEventCursor, registerExecutionEvent, timelineEventMatchesFilter, hasTimelineDetail, timelineDetailNeedsExpansion, canOpenExecutionHistory, openExecutionHistory, formatExecutionElapsed, terminalExecutionOutcome, stopStreaming, advanceExecutionViewVersion, isCurrentExecutionViewVersion, canChangeSession, resetRunSummaryFacts, recordModelUsage, summarizeUsage, recordToolFact, summarizeToolFacts } = sandbox.__executionEventTest;
 state.executionId = "execution-current";
 resetExecutionEventCursor();
 
@@ -110,6 +110,24 @@ assert.strictEqual(terminalExecutionOutcome("SUCCEEDED").uiStatus, "success");
 assert.strictEqual(terminalExecutionOutcome("FAILED").uiStatus, "error");
 assert.strictEqual(terminalExecutionOutcome("CANCELLED").uiStatus, "cancelled");
 assert.strictEqual(terminalExecutionOutcome("RUNNING"), null, "active records must not be rendered as a terminal cancellation");
+
+resetRunSummaryFacts();
+assert.strictEqual(recordModelUsage({ model: "fixture-a", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }, "root:1"), true);
+assert.strictEqual(recordModelUsage({ model: "fixture-a", usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }, "root:1"), false, "the same observed call is counted once");
+assert.strictEqual(recordModelUsage({ model: "fixture-b" }, "agent:run:instance:1"), true);
+const usageSummary = summarizeUsage();
+assert.deepStrictEqual(Array.from(usageSummary.models), ["fixture-a", "fixture-b"]);
+assert.strictEqual(usageSummary.observed, 2);
+assert.strictEqual(usageSummary.captured, 1);
+assert.strictEqual(usageSummary.total, 15);
+assert.strictEqual(usageSummary.partial, true);
+assert.strictEqual(recordToolFact({ tool: "calculator", tool_call_id: "call-1", success: true, duration_ms: 2 }, "success", "event-1"), true);
+assert.strictEqual(recordToolFact({ tool: "calculator", tool_call_id: "call-1", success: true, duration_ms: 2 }, "success", "event-2"), false, "one tool call is not counted twice");
+assert.strictEqual(recordToolFact({ tool: "web_search", tool_call_id: "call-2", success: false }, "failed", "event-3"), true);
+const toolSummary = summarizeToolFacts();
+assert.strictEqual(toolSummary.total, 2);
+assert.strictEqual(toolSummary.success, 1);
+assert.strictEqual(toolSummary.failed, 1);
 
 async function verifyCancellationState() {
   state.executionId = "execution-cancel-race";

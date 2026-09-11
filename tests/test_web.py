@@ -191,9 +191,8 @@ def test_web_mobile_shell_clips_offcanvas_inspector_overflow(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         style = client.get("/style.css").text
 
-    mobile_rules = style.split("@media (max-width: 680px)", 1)[1]
-    assert "overflow-x: hidden" in mobile_rules
-    assert "overflow-y: auto" in mobile_rules
+    mobile_rules = style.split("@media (max-width: 719px)", 1)[1]
+    assert "body { overflow: hidden; }" in mobile_rules
 
 
 def test_web_mobile_shell_keeps_the_composer_inside_the_viewport(tmp_path):
@@ -201,8 +200,8 @@ def test_web_mobile_shell_keeps_the_composer_inside_the_viewport(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         style = client.get("/style.css").text
 
-    mobile_rules = style.split("@media (max-width: 680px)", 1)[1]
-    assert ".main { min-height: 0; height: 100%; }" in mobile_rules
+    mobile_rules = style.split("@media (max-width: 719px)", 1)[1]
+    assert ".main { min-height: 0; height: calc(100% - 56px); }" in mobile_rules
     assert ".workspace { min-height: 0; }" in mobile_rules
     assert ".chat-column { min-height: 0;" in mobile_rules
 
@@ -282,12 +281,12 @@ def test_web_agents_inspector_renders_only_real_dependency_edges(tmp_path):
 
 
 def test_web_replay_invalidates_and_clears_the_previous_trace(tmp_path):
-    """A history replay cannot leave the previous run's tree visible while its trace loads."""
+    """Replay clears stale trace data without invalidating the caller's resume token."""
     with TestClient(_make_app(tmp_path)) as client:
         script = client.get("/app.js").text
 
     replay_body = script.split("function replayExecution(record, events)", 1)[1].split("function replayExecutionEvent", 1)[0]
-    assert "advanceExecutionViewVersion();" in replay_body
+    assert "advanceExecutionViewVersion();" not in replay_body
     assert "clearExecutionTrace();" in replay_body
 
 
@@ -344,7 +343,8 @@ def test_web_upload_does_not_report_http_errors_as_success(tmp_path):
     upload_body = script.split('fileInput.addEventListener("change", async () => {', 1)[1].split('$("[data-composer-tools]")', 1)[0]
     assert "file.size > 1024 * 1024" in upload_body
     assert "if (!r.ok) throw new Error" in upload_body
-    assert "addToolMsg({ tool: \"upload\", arguments: { file: file.name }, success: true" in upload_body
+    assert 'setResourceFeedback("success"' in upload_body
+    assert "addToolMsg" not in upload_body
 
 
 def test_web_static_bundle_versions_and_accessibility_foundations_are_current(tmp_path):
@@ -353,8 +353,8 @@ def test_web_static_bundle_versions_and_accessibility_foundations_are_current(tm
         page = client.get("/").text
         style = client.get("/style.css").text
 
-    assert 'href="/style.css?v=26"' in page
-    assert 'src="/app.js?v=26"' in page
+    assert 'href="/style.css?v=27"' in page
+    assert 'src="/app.js?v=27"' in page
     assert "button:focus-visible" in style
     assert "@media (prefers-reduced-motion: reduce)" in style
 
@@ -364,7 +364,7 @@ def test_web_mobile_inspector_uses_fixed_position_to_avoid_document_overflow(tmp
     with TestClient(_make_app(tmp_path)) as client:
         style = client.get("/style.css").text
 
-    compact_rules = style.split("@media (max-width: 920px)", 1)[1].split("@media (max-width: 680px)", 1)[0]
+    compact_rules = style.split("@media (max-width: 1279px)", 1)[1].split("@media (max-width: 959px)", 1)[0]
     inspector_rules = compact_rules.split(".execution-panel", 1)[1].split("}", 1)[0]
     assert "position: fixed" in inspector_rules
 

@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v25 */
+/* ReAgent Web UI 前端逻辑 v27 */
 "use strict";
 
 const state = {
@@ -13,6 +13,8 @@ const state = {
   executionTimer: null,
   executionSteps: 0,
   executionTools: 0,
+  modelUsageFacts: new Map(),
+  toolFacts: new Map(),
   executionEventIds: new Set(),
   lastExecutionSeq: 0,
   executionHistory: [],
@@ -31,6 +33,8 @@ const state = {
   sessions: [],
   sessionFilter: "recent",
   sessionMetadata: {},
+  sessionContentCache: new Map(),
+  activeAssistantElement: null,
   searchReturnFocus: null,
   resources: {
     tools: [],
@@ -45,6 +49,7 @@ const uiState = {
   primaryView: "chat",
   inspectorSection: "execution",
   inspectorTab: "timeline",
+  compactCallView: "graph",
 };
 
 const PRIMARY_VIEW_COPY = Object.freeze({
@@ -58,6 +63,12 @@ const PRIMARY_VIEW_COPY = Object.freeze({
 });
 
 const SESSION_METADATA_STORAGE_KEY = "reagent-session-metadata-v1";
+const PANE_WIDTH_STORAGE_KEY = "reagent-pane-widths-v1";
+const DEFAULT_INSPECTOR_TAB_STORAGE_KEY = "reagent-default-inspector-tab";
+const PANE_WIDTH_CONFIG = Object.freeze({
+  sidebar: { property: "--sidebar-width", element: "#primary-navigation", resizer: "#sidebar-resizer", min: 200, max: 340 },
+  inspector: { property: "--inspector-width", element: "#execution-panel", resizer: "#inspector-resizer", min: 320, max: 560 },
+});
 
 const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
 const TERMINAL_EXECUTION_OUTCOMES = Object.freeze({
@@ -78,6 +89,10 @@ const INSPECTOR_FOCUSABLE_SELECTOR = [
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
+
+function uiIconMarkup(name, className = "ui-icon") {
+  return `<svg class="${className}" aria-hidden="true"><use href="#icon-${name}"></use></svg>`;
+}
 
 function setPrimaryView(view) {
   if (!Object.prototype.hasOwnProperty.call(PRIMARY_VIEW_COPY, view)) return;
@@ -104,6 +119,22 @@ function setPrimaryView(view) {
   if (resourceTitle) resourceTitle.textContent = title;
   if (resourceDescription) resourceDescription.textContent = description;
   renderResourceWorkspace();
+}
+
+function setLocalFeedback(selector, kind, message) {
+  const element = $(selector);
+  if (!element) return;
+  element.hidden = !message;
+  element.className = "local-feedback" + (kind ? " " + kind : "");
+  element.textContent = message || "";
+}
+
+function setResourceFeedback(kind, message) {
+  setLocalFeedback("#resource-feedback", kind, message);
+}
+
+function setSessionFeedback(kind, message) {
+  setLocalFeedback("#session-feedback", kind, message);
 }
 
 function createResourceCard(title, description, meta, onActivate) {
@@ -288,6 +319,27 @@ function openLoadedSearch() {
   window.requestAnimationFrame(() => input.focus());
 }
 
+function trapLoadedSearchFocus(event) {
+  const dialog = $("#search-dialog");
+  if (event.key !== "Tab" || !dialog || dialog.hidden) return false;
+  const focusables = Array.from(dialog.querySelectorAll(INSPECTOR_FOCUSABLE_SELECTOR)).filter(isElementFocusable);
+  if (!focusables.length) {
+    event.preventDefault();
+    dialog.focus();
+    return true;
+  }
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && (!dialog.contains(document.activeElement) || document.activeElement === first)) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (!dialog.contains(document.activeElement) || document.activeElement === last)) {
+    event.preventDefault();
+    first.focus();
+  }
+  return true;
+}
+
 function renderLoadedSearchResults() {
   const input = $("#search-input");
   const results = $("#search-results");
@@ -329,6 +381,7 @@ function renderLoadedSearchResults() {
         if (entry.kind === "session") {
           if (!canChangeSession()) return;
           closeLoadedSearch(false);
+          setPrimaryView("chat");
           void openSession(entry.sessionId);
           return;
         }
@@ -348,10 +401,12 @@ function setInspectorSection(section) {
     const active = button.dataset.inspectorSection === section;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   $$('[data-inspector-section-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.inspectorSectionPanel !== section;
   });
+  if (section === "files") renderInspectorFiles();
 }
 
 function setInspectorTab(tab) {
@@ -361,10 +416,89 @@ function setInspectorTab(tab) {
     const active = button.dataset.inspectorTab === tab;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
   $$('[data-inspector-tab-panel]').forEach((panel) => {
     panel.hidden = panel.dataset.inspectorTabPanel !== tab;
   });
+  if (tab === "timeline") {
+    requestAnimationFrame(() => drawCompactCallLines($("#compact-call-graph")));
+  }
+  if (tab === "agents") renderLiveOrchestrations();
+}
+
+function setCompactCallView(view) {
+  if (view !== "graph" && view !== "tools") return;
+  uiState.compactCallView = view;
+  $$('[data-compact-call-view]').forEach((button) => {
+    const active = button.dataset.compactCallView === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $$('[data-compact-call-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.compactCallPanel !== view;
+  });
+  if (view === "graph") requestAnimationFrame(() => drawCompactCallLines($("#compact-call-graph")));
+}
+
+function renderInspectorFiles() {
+  const container = $("#inspector-file-list");
+  if (!container) return;
+  container.replaceChildren();
+  if (!state.resources.files.length) {
+    const empty = document.createElement("p");
+    empty.className = "compact-call-empty";
+    empty.textContent = "全局沙箱目前没有文件。";
+    container.appendChild(empty);
+    return;
+  }
+  state.resources.files.forEach((file) => {
+    const item = document.createElement("div");
+    item.className = "inspector-file-item";
+    const name = document.createElement("strong");
+    name.textContent = file.name;
+    const size = document.createElement("span");
+    size.textContent = formatFileSize(file.size);
+    item.append(name, size);
+    container.appendChild(item);
+  });
+}
+
+function bindLocalSettings() {
+  const defaultTab = $("#settings-default-tab");
+  let savedDefault = "timeline";
+  try {
+    const candidate = localStorage.getItem(DEFAULT_INSPECTOR_TAB_STORAGE_KEY);
+    if (["timeline", "trace", "agents", "context"].includes(candidate)) savedDefault = candidate;
+  } catch (error) { /* 忽略 */ }
+  if (defaultTab) {
+    defaultTab.value = savedDefault;
+    defaultTab.addEventListener("change", () => {
+      setInspectorTab(defaultTab.value);
+      try { localStorage.setItem(DEFAULT_INSPECTOR_TAB_STORAGE_KEY, defaultTab.value); } catch (error) { /* 忽略 */ }
+      setLocalFeedback("#settings-feedback", "success", "默认 Inspector Tab 已保存到当前浏览器。");
+    });
+  }
+  $("#settings-theme-toggle")?.addEventListener("click", () => $("#theme-toggle")?.click());
+  $("#clear-local-preferences")?.addEventListener("click", () => {
+    try {
+      ["reagent-theme", "reagent-timeline-filter", PANE_WIDTH_STORAGE_KEY, DEFAULT_INSPECTOR_TAB_STORAGE_KEY, SESSION_METADATA_STORAGE_KEY]
+        .forEach((key) => localStorage.removeItem(key));
+    } catch (error) { /* 忽略 */ }
+    document.body.dataset.theme = "light";
+    const theme = $("#theme-toggle");
+    if (theme) theme.textContent = "◐";
+    setTimelineFilter("all");
+    resetPaneWidth("sidebar");
+    resetPaneWidth("inspector");
+    state.sessionMetadata = {};
+    renderSessionList();
+    if (defaultTab) defaultTab.value = "timeline";
+    setInspectorTab("timeline");
+    setLocalFeedback("#settings-feedback", "success", "本地阅读偏好已恢复默认；服务器会话未删除。");
+  });
+  return savedDefault;
 }
 
 function advanceExecutionViewVersion() {
@@ -388,6 +522,8 @@ function syncSessionNavigationState() {
   $$("#session-list .session-item").forEach((item) => {
     const locked = !canChangeSession();
     item.setAttribute("aria-disabled", String(locked));
+    const openButton = item.querySelector("[data-session-open]");
+    if (openButton) openButton.disabled = locked;
     if (locked) item.title = "当前任务仍在执行；结束或停止后可切换会话";
     else item.removeAttribute("title");
   });
@@ -453,6 +589,7 @@ function startExecution(data) {
   advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || null;
+  setAgentMode(data.mode || state.agentMode);
   resetExecutionEventCursor();
   renderExecutionHistory(state.executionHistory);
   if (data.session_id) state.sessionId = data.session_id;
@@ -463,6 +600,7 @@ function startExecution(data) {
   if (stop) stop.disabled = false;
   state.executionSteps = 0;
   state.executionTools = 0;
+  resetRunSummaryFacts();
   state.followLatest = true;
   clearLivePlan();
   clearLiveOrchestrations();
@@ -506,6 +644,7 @@ function updateExecutionStatus(status, badgeText, stage) {
   if (inspectorState) inspectorState.textContent = badgeText;
   const mode = $("#inspector-mode");
   if (mode) mode.textContent = formatMode(state.agentMode);
+  renderInspectorRunSummary();
 }
 
 function renderExecutionMetrics() {
@@ -515,6 +654,184 @@ function renderExecutionMetrics() {
   if (stepCount) stepCount.textContent = String(state.executionSteps);
   if (toolCount) toolCount.textContent = String(state.executionTools);
   if (elapsed) elapsed.textContent = formatExecutionElapsed();
+  renderInspectorRunSummary();
+}
+
+function usageNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function resetRunSummaryFacts() {
+  state.modelUsageFacts.clear();
+  state.toolFacts.clear();
+  renderInspectorRunSummary();
+  renderCompactCalls();
+}
+
+function recordModelUsage(data, scopeKey) {
+  const key = String(scopeKey || "observed:" + String(state.modelUsageFacts.size + 1));
+  if (state.modelUsageFacts.has(key)) return false;
+  const usage = data && data.usage && typeof data.usage === "object" ? data.usage : {};
+  const prompt = usageNumber(usage.prompt_tokens);
+  const completion = usageNumber(usage.completion_tokens);
+  const providedTotal = usageNumber(usage.total_tokens);
+  const total = providedTotal !== null ? providedTotal
+    : prompt !== null && completion !== null ? prompt + completion : null;
+  state.modelUsageFacts.set(key, {
+    model: data && data.model ? String(data.model) : "",
+    prompt,
+    completion,
+    total,
+  });
+  renderInspectorRunSummary();
+  return true;
+}
+
+function summarizeUsage() {
+  const models = new Set();
+  let captured = 0;
+  let prompt = 0;
+  let completion = 0;
+  let total = 0;
+  state.modelUsageFacts.forEach((fact) => {
+    if (fact.model) models.add(fact.model);
+    if (fact.total !== null) {
+      captured += 1;
+      total += fact.total;
+    }
+    if (fact.prompt !== null) prompt += fact.prompt;
+    if (fact.completion !== null) completion += fact.completion;
+  });
+  const observed = state.modelUsageFacts.size;
+  return { models, observed, captured, prompt, completion, total, partial: captured < observed };
+}
+
+function recordToolFact(data, status, eventKey) {
+  const explicitId = data && data.tool_call_id ? String(data.tool_call_id) : "";
+  const key = explicitId ? "root:" + explicitId : "event:" + String(eventKey || state.toolFacts.size + 1);
+  const existing = state.toolFacts.get(key);
+  const normalizedStatus = status === "failed" || (data && data.success === false) ? "failed"
+    : status === "success" || (data && data.success === true) ? "success" : "pending";
+  state.toolFacts.set(key, {
+    key,
+    name: String((data && data.tool) || (existing && existing.name) || "tool"),
+    status: normalizedStatus,
+    durationMs: data && data.duration_ms != null ? Number(data.duration_ms) : existing?.durationMs ?? null,
+  });
+  renderCompactCalls();
+  renderInspectorRunSummary();
+  return !existing;
+}
+
+function summarizeToolFacts() {
+  const summary = { total: state.toolFacts.size, success: 0, failed: 0, pending: 0 };
+  state.toolFacts.forEach((fact) => {
+    if (fact.status === "success") summary.success += 1;
+    else if (fact.status === "failed") summary.failed += 1;
+    else summary.pending += 1;
+  });
+  return summary;
+}
+
+function createCompactCallNode(label, role, status = "") {
+  const node = document.createElement("span");
+  node.className = "compact-call-node " + role + (status ? " " + status : "");
+  node.dataset.callRole = role;
+  node.textContent = label;
+  return node;
+}
+
+function drawCompactCallLines(container) {
+  const svg = container.querySelector(".compact-call-svg");
+  const user = container.querySelector('[data-call-role="user"]');
+  const runtime = container.querySelector('[data-call-role="runtime"]');
+  if (!svg || !user || !runtime || !container.offsetWidth) return;
+  const containerRect = container.getBoundingClientRect();
+  const point = (node, edge) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      x: rect.left - containerRect.left + rect.width / 2,
+      y: edge === "top" ? rect.top - containerRect.top : rect.bottom - containerRect.top,
+    };
+  };
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", `0 0 ${containerRect.width} ${containerRect.height}`);
+  const appendLine = (from, to) => {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", String(from.x));
+    line.setAttribute("y1", String(from.y));
+    line.setAttribute("x2", String(to.x));
+    line.setAttribute("y2", String(to.y));
+    svg.appendChild(line);
+  };
+  appendLine(point(user, "bottom"), point(runtime, "top"));
+  container.querySelectorAll('[data-call-role="tool"], [data-call-role="agent"]').forEach((node) => {
+    appendLine(point(runtime, "bottom"), point(node, "top"));
+  });
+}
+
+function renderCompactCalls() {
+  const graph = $("#compact-call-graph");
+  const tools = $("#compact-tool-calls");
+  if (!graph || !tools) return;
+  graph.replaceChildren();
+  tools.replaceChildren();
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("compact-call-svg");
+  svg.setAttribute("aria-hidden", "true");
+  const nodes = document.createElement("div");
+  nodes.className = "compact-call-nodes";
+  nodes.append(createCompactCallNode("User", "user"), createCompactCallNode("General Agent", "runtime"));
+  state.toolFacts.forEach((fact) => nodes.appendChild(createCompactCallNode(fact.name, "tool", fact.status)));
+  state.orchestrationRuns.forEach((run) => {
+    run.agents.forEach((agent) => nodes.appendChild(createCompactCallNode(agent.profile, "agent", orchestrationStateName(agent.status))));
+  });
+  graph.append(svg, nodes);
+
+  const toolList = document.createElement("ol");
+  toolList.className = "compact-tool-list";
+  state.toolFacts.forEach((fact) => {
+    const item = document.createElement("li");
+    const name = document.createElement("span");
+    name.textContent = fact.name;
+    const status = document.createElement("strong");
+    status.textContent = fact.status === "success" ? "成功" : fact.status === "failed" ? "失败" : "等待结果";
+    item.append(name, status);
+    toolList.appendChild(item);
+  });
+  if (!toolList.children.length) {
+    const empty = document.createElement("p");
+    empty.className = "compact-call-empty";
+    empty.textContent = "当前运行尚无工具调用。";
+    tools.appendChild(empty);
+  } else {
+    tools.appendChild(toolList);
+  }
+  requestAnimationFrame(() => drawCompactCallLines(graph));
+}
+
+function renderInspectorRunSummary() {
+  const usage = summarizeUsage();
+  const tools = summarizeToolFacts();
+  const models = [...usage.models];
+  const setText = (selector, value) => { const element = $(selector); if (element) element.textContent = value; };
+  setText("#summary-status", $("#run-state-badge")?.textContent || "准备就绪");
+  setText("#summary-mode", formatMode(state.agentMode));
+  setText("#summary-decisions", String(state.executionSteps));
+  const plan = state.currentPlanVersion !== null ? state.planSnapshots.get(state.currentPlanVersion) : null;
+  setText("#summary-plan-steps", String(plan && Array.isArray(plan.steps) ? plan.steps.length : 0));
+  setText("#summary-model", !models.length ? "未采集" : models.length === 1 ? models[0] : "多模型 · " + models.join("、"));
+  const coverage = usage.observed ? String(usage.captured) + "/" + String(usage.observed) + " 次调用" : "未采集";
+  setText("#summary-tokens", usage.captured ? String(usage.total) + " tokens · " + (usage.partial ? "部分采集 " : "") + coverage : coverage);
+  const toolParts = [String(tools.total) + " 次"];
+  if (tools.success) toolParts.push(String(tools.success) + " 成功");
+  if (tools.failed) toolParts.push(String(tools.failed) + " 失败");
+  if (tools.pending) toolParts.push(String(tools.pending) + " 等待");
+  setText("#summary-tool-calls", toolParts.join(" · "));
+  setText("#summary-duration", formatExecutionElapsed());
 }
 
 function formatExecutionElapsed() {
@@ -530,6 +847,22 @@ function formatExecutionElapsed() {
 
 function formatMode(mode) {
   return mode === "plan" ? "Plan" : "ReAct";
+}
+
+function setAgentMode(mode) {
+  const normalized = mode === "plan" ? "plan" : "react";
+  state.agentMode = normalized;
+  $$(".mode-btn").forEach((button) => {
+    const active = button.dataset.mode === normalized;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const label = formatMode(normalized);
+  const badge = $("#mode-badge");
+  if (badge) badge.textContent = label;
+  const inspectorMode = $("#inspector-mode");
+  if (inspectorMode) inspectorMode.textContent = label;
+  renderInspectorRunSummary();
 }
 
 function truncateForWorkspace(value) {
@@ -744,6 +1077,7 @@ function setLivePlan(plan, planVersion, revisions = 0) {
   state.planRevisions = Math.max(0, Number(revisions) || 0);
   renderLivePlan(normalized, state.planRevisions, version);
   renderPlanRevisionHistory();
+  renderInspectorRunSummary();
 }
 
 function updateLivePlanStep(payload) {
@@ -808,6 +1142,7 @@ function clearLivePlan() {
   if (meta) meta.textContent = "0 步";
   if (history) history.replaceChildren();
   if (section) section.hidden = true;
+  renderInspectorRunSummary();
 }
 
 function applyPlanLifecycleEvent(type, payload, timestamp) {
@@ -1173,6 +1508,7 @@ function clearLiveOrchestrations() {
   if (meta) meta.textContent = "0 个编排";
   if (section) section.hidden = true;
   if (empty) empty.hidden = false;
+  renderCompactCalls();
 }
 
 function renderOrchestrationAgent(agent) {
@@ -1226,6 +1562,53 @@ function renderOrchestrationAgent(agent) {
   return item;
 }
 
+function dependencyGraphProblem(agentsByStep) {
+  for (const agent of agentsByStep.values()) {
+    if (agent.dependsOn.some((stepIndex) => !agentsByStep.has(Number(stepIndex)))) return "存在未知依赖";
+  }
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (stepIndex) => {
+    if (visiting.has(stepIndex)) return true;
+    if (visited.has(stepIndex)) return false;
+    visiting.add(stepIndex);
+    const agent = agentsByStep.get(stepIndex);
+    if (agent && agent.dependsOn.some((source) => visit(Number(source)))) return true;
+    visiting.delete(stepIndex);
+    visited.add(stepIndex);
+    return false;
+  };
+  for (const stepIndex of agentsByStep.keys()) {
+    if (visit(stepIndex)) return "检测到循环依赖";
+  }
+  return "";
+}
+
+function drawAgentDependencyLines(graph, agentsByStep) {
+  const svg = graph.querySelector(".agent-dependency-svg");
+  const nodeList = graph.querySelector(".agent-dependency-nodes");
+  if (!svg || !nodeList || !nodeList.offsetWidth) return;
+  const containerRect = nodeList.getBoundingClientRect();
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", `0 0 ${containerRect.width} ${containerRect.height}`);
+  agentsByStep.forEach((agent) => {
+    const target = nodeList.querySelector(`[data-step-index="${agent.stepIndex}"]`);
+    if (!target) return;
+    const targetRect = target.getBoundingClientRect();
+    agent.dependsOn.forEach((stepIndex) => {
+      const source = nodeList.querySelector(`[data-step-index="${Number(stepIndex)}"]`);
+      if (!source) return;
+      const sourceRect = source.getBoundingClientRect();
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("x1", String(sourceRect.right - containerRect.left));
+      line.setAttribute("y1", String(sourceRect.top - containerRect.top + sourceRect.height / 2));
+      line.setAttribute("x2", String(targetRect.left - containerRect.left));
+      line.setAttribute("y2", String(targetRect.top - containerRect.top + targetRect.height / 2));
+      svg.appendChild(line);
+    });
+  });
+}
+
 function renderOrchestrationDependencyGraph(agents) {
   const graph = document.createElement("section");
   graph.className = "agent-dependency-graph";
@@ -1233,13 +1616,19 @@ function renderOrchestrationDependencyGraph(agents) {
   heading.textContent = "依赖关系";
   graph.appendChild(heading);
 
+  const agentsByStep = new Map(agents.map((agent) => [agent.stepIndex, agent]));
+  const problem = dependencyGraphProblem(agentsByStep);
+  const visibleAgents = agents.slice(0, 12);
   const nodeList = document.createElement("div");
   nodeList.className = "agent-dependency-nodes";
-  const agentsByStep = new Map();
-  agents.forEach((agent) => {
-    agentsByStep.set(agent.stepIndex, agent);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("agent-dependency-svg");
+  svg.setAttribute("aria-hidden", "true");
+  nodeList.appendChild(svg);
+  visibleAgents.forEach((agent) => {
     const node = document.createElement("span");
     node.className = "agent-dependency-node " + orchestrationStateName(agent.status);
+    node.dataset.stepIndex = String(agent.stepIndex);
     node.textContent = String(agent.stepIndex + 1) + " · " + agent.profile;
     nodeList.appendChild(node);
   });
@@ -1249,25 +1638,23 @@ function renderOrchestrationDependencyGraph(agents) {
   edges.className = "agent-dependency-edges";
   let edgeCount = 0;
   agents.forEach((agent) => {
-    const upstream = [];
-    agent.dependsOn.forEach((stepIndex) => {
-      const source = agentsByStep.get(Number(stepIndex));
-      if (source) upstream.push(source);
-    });
-    if (!upstream.length) return;
+    if (!agent.dependsOn.length) return;
     const edge = document.createElement("span");
     edge.className = "agent-dependency-edge";
-    edge.textContent = upstream.map((source) => "步骤 " + String(source.stepIndex + 1)).join("、") + " → 步骤 " + String(agent.stepIndex + 1);
+    edge.textContent = agent.dependsOn.map((source) => "步骤 " + String(Number(source) + 1)).join("、") + " → 步骤 " + String(agent.stepIndex + 1);
     edges.appendChild(edge);
     edgeCount += 1;
   });
-  if (!edgeCount) {
-    const empty = document.createElement("span");
-    empty.className = "agent-dependency-empty";
-    empty.textContent = "本次计划未声明跨 Agent 依赖";
-    edges.appendChild(empty);
+  if (problem || !edgeCount || agents.length > 12) {
+    const message = document.createElement("span");
+    message.className = "agent-dependency-empty";
+    message.textContent = problem ? "关系不可用（" + problem + "），已回退到实例列表"
+      : agents.length > 12 ? "概览仅显示前 12 个节点；完整实例见下方列表"
+      : "本次计划未声明跨 Agent 依赖";
+    edges.appendChild(message);
   }
   graph.appendChild(edges);
+  if (!problem) requestAnimationFrame(() => drawAgentDependencyLines(graph, agentsByStep));
   return graph;
 }
 
@@ -1286,6 +1673,7 @@ function renderLiveOrchestrations() {
     meta.textContent = "0 个编排";
     list.replaceChildren();
     if (empty) empty.hidden = false;
+    renderCompactCalls();
     return;
   }
 
@@ -1341,6 +1729,7 @@ function renderLiveOrchestrations() {
     details.appendChild(body);
     list.appendChild(details);
   });
+  renderCompactCalls();
 }
 
 function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
@@ -1416,6 +1805,7 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
       agent.stage = payload.is_final ? "已生成子任务结果" : "已决定下一步工具调用";
       if (payload.is_final && payload.content_preview) agent.answerPreview = String(payload.content_preview);
     }
+    recordModelUsage(payload, "agent:" + String(run.runId) + ":" + String(payload.agent_instance_id || "unknown") + ":" + String(payload.step || "unknown"));
     appendExecutionEvent(
       "running",
       String(payload.agent_profile || "子 Agent") + " 完成模型决策",
@@ -1425,6 +1815,11 @@ function applyOrchestrationLifecycleEvent(type, payload, timestamp) {
   } else if (type === "agent.tool.started" || type === "agent.tool.retry_scheduled" || type === "agent.tool.completed") {
     const agent = upsertOrchestrationAgent(run, payload);
     const completed = type === "agent.tool.completed";
+    recordToolFact(
+      { ...payload, tool_call_id: String(payload.agent_instance_id || "unknown") + ":" + String(payload.tool_call_id || payload.event_id || "unknown") },
+      completed ? (payload.success === false ? "failed" : "success") : "pending",
+      payload.event_id
+    );
     const retrying = type === "agent.tool.retry_scheduled";
     if (agent) {
       agent.status = "RUNNING";
@@ -1716,9 +2111,9 @@ function replayExecutionFrame(frame, viewVersion = state.executionViewVersion) {
 }
 
 function replayExecution(record, events) {
-  advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = record.execution_id;
+  setAgentMode(record.agent_mode || state.agentMode);
   state.sessionId = record.session_id || state.sessionId;
   renderExecutionHistory(state.executionHistory);
   state.executionQueuedAt = timestampToMillis(record.created_at);
@@ -1726,6 +2121,7 @@ function replayExecution(record, events) {
   state.executionFinishedAt = timestampToMillis(record.finished_at);
   state.executionSteps = 0;
   state.executionTools = 0;
+  resetRunSummaryFacts();
   resetExecutionEventCursor();
   clearLivePlan();
   clearLiveOrchestrations();
@@ -1777,10 +2173,12 @@ function replayExecutionEvent(event) {
   }
   if (type === "step") {
     state.executionSteps = Math.max(state.executionSteps, Number(payload.step) || 0);
+    recordModelUsage(payload, "root:" + String(event.event_id || payload.step || state.executionSteps));
     appendExecutionEvent("running", "模型完成决策", modelUsageDetail(payload, payload.is_final ? "正在组织最终回答" : "已确定下一步"), timestamp);
     return;
   }
   if (type === "tool.started") {
+    recordToolFact(payload, "pending", event.event_id);
     markToolRunning(payload);
     appendExecutionEvent("running", "开始调用工具：" + String(payload.tool || ""), "", timestamp);
     return;
@@ -1790,6 +2188,7 @@ function replayExecutionEvent(event) {
     return;
   }
   if (type === "tool_result") {
+    recordToolFact(payload, payload.success === false ? "failed" : "success", event.event_id);
     state.executionTools += 1;
     appendExecutionEvent(
       payload.success === false ? "error" : "success",
@@ -1993,7 +2392,35 @@ function sessionMetadataFor(sessionId) {
 
 function sessionTitle(session) {
   const alias = sessionMetadataFor(session.session_id).alias;
-  return alias || session.session_id.slice(-16);
+  const cached = state.sessionContentCache.get(session.session_id);
+  return alias || (cached && cached.title) || session.session_id.slice(-16);
+}
+
+function sessionPreview(session) {
+  const cached = state.sessionContentCache.get(session.session_id);
+  return cached && cached.preview ? cached.preview : "打开后加载消息预览";
+}
+
+function sessionMessageText(message) {
+  if (!message || message.content === null || message.content === undefined) return "";
+  const raw = typeof message.content === "string" ? message.content : formatJsonValue(message.content);
+  return raw.replace(/\s+/g, " ").trim();
+}
+
+function cacheSessionMessages(sessionId, messages) {
+  if (!sessionId || !Array.isArray(messages)) return;
+  const existing = state.sessionContentCache.get(sessionId);
+  const firstUser = messages.find((message) => message && message.role === "user");
+  const firstAssistant = messages.find((message) => message && message.role === "assistant" && sessionMessageText(message));
+  const title = sessionMessageText(firstUser).slice(0, 48);
+  const preview = sessionMessageText(firstAssistant).slice(0, 72);
+  if (!title && !preview) return;
+  state.sessionContentCache.set(sessionId, {
+    title: (existing && existing.title) || title || sessionId.slice(-16),
+    preview: (existing && existing.preview) || preview || "尚无 Assistant 回复",
+  });
+  renderSessionList();
+  if (!$("#search-dialog")?.hidden) renderLoadedSearchResults();
 }
 
 function updateSessionMetadata(sessionId, patch) {
@@ -2019,8 +2446,15 @@ function sessionGroupLabel(value) {
   const daysAgo = Math.round((today.getTime() - sessionDay.getTime()) / 86400000);
   if (daysAgo <= 0) return "今天";
   if (daysAgo === 1) return "昨天";
-  if (daysAgo <= 7) return "最近 7 天";
+  if (daysAgo <= 6) return "最近 7 天";
   return "较早";
+}
+
+function recentSessionCutoff() {
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 6);
+  return cutoff.getTime();
 }
 
 function filteredSessions() {
@@ -2031,7 +2465,7 @@ function filteredSessions() {
     if (filter === "recent") {
       const date = new Date(session.updated_at);
       if (Number.isNaN(date.getTime())) return false;
-      return Date.now() - date.getTime() <= 7 * 86400000;
+      return date.getTime() >= recentSessionCutoff();
     }
     return true;
   });
@@ -2064,41 +2498,36 @@ function renderSessionList() {
       const li = document.createElement("li");
       li.className = "session-item";
       li.dataset.sessionId = session.session_id;
-      li.tabIndex = 0;
-      li.setAttribute("role", "button");
-      li.setAttribute("aria-label", "打开会话：" + sessionTitle(session));
       li.innerHTML = `
-        <span class="si-icon">💬</span>
-        <span class="si-name">${esc(sessionTitle(session))}</span>
-        <span class="si-time">${esc((session.updated_at || "").slice(11, 19))}</span>
-        <span class="si-pin${metadata.pinned ? " active" : ""}" data-session-pin title="${metadata.pinned ? "取消本地置顶" : "本地置顶"}">${metadata.pinned ? "★" : "☆"}</span>
-        <span class="si-alias" data-session-alias title="编辑本地名称">✎</span>
-        <span class="si-del" data-session-delete title="删除会话">✕</span>
+        <button class="session-open" type="button" data-session-open aria-label="打开会话：${esc(sessionTitle(session))}">
+          ${uiIconMarkup("chat")}
+          <span class="session-copy"><span class="si-name">${esc(sessionTitle(session))}</span><span class="si-preview">${esc(sessionPreview(session))}</span></span>
+          <span class="si-time">${esc((session.updated_at || "").slice(11, 16))}</span>
+        </button>
+        <span class="session-actions">
+          <button class="si-pin${metadata.pinned ? " active" : ""}" type="button" data-session-pin title="${metadata.pinned ? "取消本地置顶" : "本地置顶"}" aria-label="${metadata.pinned ? "取消本地置顶" : "本地置顶"}">${uiIconMarkup("pin")}</button>
+          <button class="si-alias" type="button" data-session-alias title="编辑本地名称" aria-label="编辑本地名称">${uiIconMarkup("edit")}</button>
+          <button class="si-del" type="button" data-session-delete title="删除会话" aria-label="删除会话">${uiIconMarkup("x")}</button>
+        </span>
       `;
       if (state.sessionId === session.session_id) li.classList.add("active");
       const sessionLocked = !canChangeSession();
       li.setAttribute("aria-disabled", String(sessionLocked));
       if (sessionLocked) li.title = "当前任务仍在执行；结束或停止后可切换会话";
-      const activate = (event) => {
-        const action = event.target.closest("[data-session-pin], [data-session-alias], [data-session-delete]");
-        if (action) {
-          event.stopPropagation();
-          if (action.matches("[data-session-pin]")) updateSessionMetadata(session.session_id, { pinned: !metadata.pinned });
-          if (action.matches("[data-session-alias]")) {
-            const alias = window.prompt("仅此浏览器显示的会话名称", metadata.alias || "");
-            if (alias !== null) updateSessionMetadata(session.session_id, { alias });
-          }
-          if (action.matches("[data-session-delete]") && canChangeSession()) void deleteSession(session.session_id);
-          return;
-        }
+      const openButton = li.querySelector("[data-session-open]");
+      openButton.disabled = sessionLocked;
+      openButton.addEventListener("click", () => {
         if (canChangeSession()) void openSession(session.session_id);
-      };
-      li.addEventListener("click", activate);
-      li.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          activate(event);
-        }
+      });
+      li.querySelector("[data-session-pin]").addEventListener("click", () => {
+        updateSessionMetadata(session.session_id, { pinned: !metadata.pinned });
+      });
+      li.querySelector("[data-session-alias]").addEventListener("click", () => {
+        const alias = window.prompt("仅此浏览器显示的会话名称", metadata.alias || "");
+        if (alias !== null) updateSessionMetadata(session.session_id, { alias });
+      });
+      li.querySelector("[data-session-delete]").addEventListener("click", () => {
+        if (canChangeSession()) void deleteSession(session.session_id);
       });
       ul.appendChild(li);
     });
@@ -2126,7 +2555,11 @@ async function openSession(sessionId) {
   try {
     const data = await fetch(`/api/web/sessions/${sessionId}/messages`).then((r) => r.json());
     if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
+    cacheSessionMessages(sessionId, data.messages || []);
     renderHistory(data.messages || []);
+    const session = state.sessions.find((item) => item.session_id === sessionId) || { session_id: sessionId };
+    const title = $("#workspace-title");
+    if (title) title.textContent = sessionTitle(session);
     setStatus(`会话 ${sessionId.slice(-12)}`);
   } catch (e) {
     if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
@@ -2168,10 +2601,46 @@ async function openOrchestrationDetail(runId) {
     const r = await fetch(`/api/web/orchestrations/${encodeURIComponent(runId)}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
-    renderOrchestrationPanel(data);
+    setPrimaryView("chat");
+    setInspectorSection("execution");
+    setInspectorTab("agents");
+    setInspectorCollapsed(false, true);
+    hydrateHistoricalOrchestration(data);
+    renderLiveOrchestrations();
   } catch (e) {
     addErrorMsg("加载编排详情失败: " + e.message);
   }
+}
+
+function hydrateHistoricalOrchestration(data) {
+  clearLiveOrchestrations();
+  const run = getOrchestrationRun(data.run_id);
+  run.depth = Number(data.depth) || 1;
+  run.taskPreview = String(data.task || "历史编排");
+  run.rationale = String(data.plan?.rationale || "");
+  run.status = data.status || "PENDING";
+  run.durationMs = data.duration_ms != null ? Number(data.duration_ms) : null;
+  run.stage = orchestrationStateLabel(run.status) + " · 历史记录";
+  const steps = Array.isArray(data.plan?.steps) ? data.plan.steps : [];
+  const results = Array.isArray(data.agent_results) ? data.agent_results : [];
+  steps.forEach((step, index) => {
+    const result = results[index] || results.find((item) => item.agent === step.agent) || {};
+    const id = String(data.run_id) + ":step:" + String(index);
+    const agent = upsertOrchestrationAgent(run, {
+      agent_instance_id: id,
+      agent_profile: step.agent,
+      step_index: index,
+      task_preview: step.task || step.description || "",
+      depends_on: Array.isArray(step.depends_on) ? step.depends_on : [],
+    });
+    agent.status = result.status || (run.status === "SUCCEEDED" ? "SUCCEEDED" : "PENDING");
+    agent.answerPreview = String(result.answer || "");
+    agent.error = String(result.error || "");
+    agent.durationMs = result.duration_ms != null ? Number(result.duration_ms) : null;
+    agent.toolCalls = Array.isArray(result.tool_calls) ? result.tool_calls.length : Number(result.tool_calls || 0);
+    agent.stage = orchestrationStateLabel(agent.status) + " · 历史记录";
+  });
+  return run;
 }
 
 function renderOrchestrationPanel(data) {
@@ -2218,7 +2687,9 @@ function renderOrchestrationBody(data) {
         <span class="pf-icon">👤</span>
         <span class="pf-desc"><b>${esc(s.agent)}</b>${esc(deps)}</span>
       </div>`;
-      if (i < data.plan.steps.length - 1) html += `<span class="pf-arrow">→</span>`;
+      if (s.depends_on && s.depends_on.length) {
+        html += `<span class="pf-dependency">${esc(s.depends_on.map((index) => String(Number(index) + 1)).join("、"))} → ${String(i + 1)}</span>`;
+      }
     });
     html += `</div></div>`;
   }
@@ -2295,6 +2766,7 @@ function bindOrchestrationToggles(panel) {
 
 function renderHistory(messages) {
   const callsById = new Map();
+  state.activeAssistantElement = null;
   $("#messages").replaceChildren();
   messages.forEach((message) => {
     if (!message || !message.role) return;
@@ -2370,19 +2842,37 @@ function newSession() {
   if (!canChangeSession()) return;
   setPrimaryView("chat");
   advanceExecutionViewVersion();
+  if (state.executionTimer) window.clearInterval(state.executionTimer);
+  state.executionTimer = null;
+  state.abortCtrl = null;
   state.sessionId = null;
   state.executionId = null;
+  state.activeAssistantElement = null;
   resetExecutionEventCursor();
   state.executionQueuedAt = null;
   state.executionStartedAt = null;
   state.executionFinishedAt = null;
   state.executionSteps = 0;
   state.executionTools = 0;
+  resetRunSummaryFacts();
   state.followLatest = true;
   clearLivePlan();
   clearLiveOrchestrations();
   clearExecutionContext();
   clearExecutionTrace();
+  const title = $("#workspace-title");
+  if (title) title.textContent = "开始一个新任务";
+  const timeline = $("#execution-timeline");
+  if (timeline) timeline.replaceChildren();
+  const timelineCount = $("#timeline-count");
+  if (timelineCount) timelineCount.textContent = "0";
+  const stop = $("#stop");
+  if (stop) {
+    stop.disabled = false;
+    stop.style.display = "none";
+  }
+  updateExecutionStatus("idle", "准备就绪", "提交任务后，执行过程会实时显示在右侧。");
+  renderExecutionMetrics();
   setNavigationOpen(false);
   $("#messages").innerHTML = renderWelcome();
   $$("#session-list .session-item").forEach((el) => el.classList.remove("active"));
@@ -2397,7 +2887,7 @@ function newSession() {
 function renderWelcome() {
   return `
     <div class="welcome">
-      <span class="welcome-mark" aria-hidden="true">R</span>
+      ${uiIconMarkup("brand", "brand-emblem welcome-emblem")}
       <h2>让 Agent 的每一步都有迹可循</h2>
       <p>发送任务后，可在右侧查看决策轮次、工具调用、计划和 Trace 详情。</p>
       <div class="welcome-tips" aria-label="可用运行方式">
@@ -2425,12 +2915,19 @@ function addMessage(role, content, meta) {
   }
   const contentEl = document.createElement("div");
   if (role === "assistant") {
+    const mark = document.createElement("span");
+    mark.className = "assistant-mark";
+    mark.innerHTML = uiIconMarkup("brand", "brand-emblem");
+    const body = document.createElement("div");
+    body.className = "assistant-content";
     contentEl.className = "md-body";
     contentEl.innerHTML = renderMarkdown(content);
+    body.appendChild(contentEl);
+    div.append(mark, body);
   } else {
     contentEl.textContent = content;
+    div.appendChild(contentEl);
   }
-  div.appendChild(contentEl);
   if (role === "assistant") ensureCopyButton(div);
   $("#messages").appendChild(div);
   scrollToBottom();
@@ -2577,6 +3074,16 @@ function toolCardBodyHtml(data) {
   `;
 }
 
+function insertExecutionProgress(element) {
+  const messages = $("#messages");
+  const anchor = state.activeAssistantElement;
+  if (anchor && anchor.isConnected && anchor.parentElement === messages) {
+    messages.insertBefore(element, anchor);
+  } else {
+    messages.appendChild(element);
+  }
+}
+
 function addToolMsg(data) {
   // 工具卡片按稳定 tool_call_id 对应真实生命周期，历史记录复用同一套展示。
   const normalized = { ...data, arguments: data.arguments === undefined ? {} : data.arguments };
@@ -2590,7 +3097,7 @@ function addToolMsg(data) {
   const dur = normalized.duration_ms != null ? `⏱ ${formatMs(normalized.duration_ms)}` : "";
   div.innerHTML = `
     <div class="ts-header">
-      <span class="ts-icon">${normalized.tool === "delegate" ? "🌐" : "🛠"}</span>
+      <span class="ts-icon">${uiIconMarkup(normalized.tool === "delegate" ? "network" : "tool")}</span>
       <span class="ts-name">${esc(normalized.tool || "tool")}</span>
       ${toolStatusMarkup(status)}
       <span class="ts-dur">${esc(dur)}</span>
@@ -2605,7 +3112,7 @@ function addToolMsg(data) {
     caret.textContent = div.classList.contains("open") ? "▴" : "▾";
   });
   bindToolOutputDetailAction(div);
-  $("#messages").appendChild(div);
+  insertExecutionProgress(div);
   scrollToBottom();
   return div;
 }
@@ -2862,11 +3369,130 @@ function isAtLatest(messages) {
 }
 
 function isCompactInspectorViewport() {
-  return window.matchMedia("(max-width: 920px)").matches;
+  return window.matchMedia("(max-width: 1279px)").matches;
 }
 
 function isMobileNavigationViewport() {
-  return window.matchMedia("(max-width: 680px)").matches;
+  return window.matchMedia("(max-width: 959px)").matches;
+}
+
+function paneWidthLimits(name) {
+  const config = PANE_WIDTH_CONFIG[name];
+  if (!config) return null;
+  const otherName = name === "sidebar" ? "inspector" : "sidebar";
+  const otherConfig = PANE_WIDTH_CONFIG[otherName];
+  const railWidth = $("#app-rail")?.getBoundingClientRect().width || 60;
+  const otherWidth = $(otherConfig.element)?.getBoundingClientRect().width || otherConfig.min;
+  const available = window.innerWidth - railWidth - otherWidth - 420 - 12;
+  return { min: config.min, max: Math.max(config.min, Math.min(config.max, available)) };
+}
+
+function persistPaneWidths() {
+  const widths = {};
+  Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
+    const value = uiState.paneWidths?.[name];
+    if (Number.isFinite(value)) widths[name] = value;
+  });
+  try { localStorage.setItem(PANE_WIDTH_STORAGE_KEY, JSON.stringify(widths)); } catch (error) { /* 忽略 */ }
+}
+
+function syncPaneResizerValue(name) {
+  const config = PANE_WIDTH_CONFIG[name];
+  const resizer = config ? $(config.resizer) : null;
+  const pane = config ? $(config.element) : null;
+  if (!resizer || !pane) return;
+  const limits = paneWidthLimits(name);
+  const width = Math.round(pane.getBoundingClientRect().width);
+  resizer.setAttribute("aria-valuemin", String(limits.min));
+  resizer.setAttribute("aria-valuemax", String(limits.max));
+  resizer.setAttribute("aria-valuenow", String(width));
+  resizer.setAttribute("aria-valuetext", String(width) + " 像素");
+}
+
+function setPaneWidth(name, requestedWidth, persist = true) {
+  const config = PANE_WIDTH_CONFIG[name];
+  if (!config || isCompactInspectorViewport()) return null;
+  const limits = paneWidthLimits(name);
+  const width = Math.round(Math.min(limits.max, Math.max(limits.min, Number(requestedWidth) || limits.min)));
+  document.documentElement.style.setProperty(config.property, String(width) + "px");
+  uiState.paneWidths = uiState.paneWidths || {};
+  uiState.paneWidths[name] = width;
+  syncPaneResizerValue(name);
+  syncPaneResizerValue(name === "sidebar" ? "inspector" : "sidebar");
+  if (persist) persistPaneWidths();
+  return width;
+}
+
+function resetPaneWidth(name) {
+  const config = PANE_WIDTH_CONFIG[name];
+  if (!config) return;
+  document.documentElement.style.removeProperty(config.property);
+  uiState.paneWidths = uiState.paneWidths || {};
+  delete uiState.paneWidths[name];
+  persistPaneWidths();
+  requestAnimationFrame(() => syncPaneResizerValue(name));
+}
+
+function bindPaneResizers() {
+  uiState.paneWidths = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANE_WIDTH_STORAGE_KEY) || "{}");
+    Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
+      if (Number.isFinite(Number(saved[name]))) setPaneWidth(name, Number(saved[name]), false);
+    });
+  } catch (error) { /* 忽略 */ }
+
+  Object.entries(PANE_WIDTH_CONFIG).forEach(([name, config]) => {
+    const resizer = $(config.resizer);
+    const pane = $(config.element);
+    if (!resizer || !pane) return;
+    syncPaneResizerValue(name);
+    resizer.addEventListener("pointerdown", (event) => {
+      if (isCompactInspectorViewport()) return;
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = pane.getBoundingClientRect().width;
+      resizer.setPointerCapture(event.pointerId);
+      document.body.classList.add("is-pane-resizing");
+      const move = (moveEvent) => {
+        const delta = name === "sidebar" ? moveEvent.clientX - startX : startX - moveEvent.clientX;
+        setPaneWidth(name, startWidth + delta, false);
+      };
+      const end = (endEvent) => {
+        resizer.removeEventListener("pointermove", move);
+        resizer.removeEventListener("pointerup", end);
+        resizer.removeEventListener("pointercancel", end);
+        if (resizer.hasPointerCapture(endEvent.pointerId)) resizer.releasePointerCapture(endEvent.pointerId);
+        document.body.classList.remove("is-pane-resizing");
+        persistPaneWidths();
+      };
+      resizer.addEventListener("pointermove", move);
+      resizer.addEventListener("pointerup", end);
+      resizer.addEventListener("pointercancel", end);
+    });
+    resizer.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "Home" && event.key !== "End") return;
+      event.preventDefault();
+      const limits = paneWidthLimits(name);
+      const current = pane.getBoundingClientRect().width;
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      const requested = event.key === "Home" ? limits.min
+        : event.key === "End" ? limits.max
+        : current + (name === "sidebar" ? direction : -direction) * (event.shiftKey ? 32 : 8);
+      setPaneWidth(name, requested);
+    });
+    resizer.addEventListener("dblclick", () => resetPaneWidth(name));
+  });
+  window.addEventListener("resize", () => {
+    renderCompactCalls();
+    if (uiState.inspectorTab === "agents") renderLiveOrchestrations();
+    if (isCompactInspectorViewport()) return;
+    Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
+      const saved = uiState.paneWidths?.[name];
+      if (Number.isFinite(saved)) setPaneWidth(name, saved, false);
+      else syncPaneResizerValue(name);
+    });
+  });
 }
 
 function isInspectorCollapsed() {
@@ -2876,7 +3502,8 @@ function isInspectorCollapsed() {
 }
 
 function isElementFocusable(element) {
-  if (!element || element.disabled || element.getAttribute("aria-hidden") === "true") return false;
+  if (!element || element.disabled || element.getAttribute("aria-hidden") === "true"
+      || element.getAttribute("tabindex") === "-1") return false;
   if (element.closest("[inert], [aria-hidden='true']")) return false;
   return !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
 }
@@ -3084,7 +3711,7 @@ function addWorkflowPanel(data, opts) {
     ? ` · 计划 ${data.plan.length} 步${data.plan_revisions ? ` · 重规划 ${data.plan_revisions}` : ""}`
     : "";
   header.innerHTML = `
-    <span class="wf-title">🔍 Agent 工作流</span>
+    <span class="wf-title">${uiIconMarkup("trace")} Agent 工作流</span>
     <span class="wf-meta">${data.trace_id ? data.trace_id.slice(-12) : ""}${planInfo}</span>
     <span class="wf-toggle">收起 ▴</span>
   `;
@@ -3099,7 +3726,7 @@ function addWorkflowPanel(data, opts) {
   });
   panel.appendChild(header);
   panel.appendChild(body);
-  $("#messages").appendChild(panel);
+  insertExecutionProgress(panel);
   panel.classList.add("open");
   scrollToBottom();
   body.querySelector("[data-workflow-inspector]")?.addEventListener("click", (event) => {
@@ -3382,6 +4009,7 @@ async function reconcileDetachedExecution(executionId, assistantEl, contentEl) {
       "无法读取服务端执行记录；请稍后从执行历史使用 execution ID 继续查看。"
     );
   }
+  if (state.activeAssistantElement === assistantEl) state.activeAssistantElement = null;
 }
 
 /* ================= 发送 ================= */
@@ -3399,6 +4027,7 @@ async function send() {
 
   const assistantEl = addMessage("assistant", "");
   assistantEl.classList.add("streaming");
+  state.activeAssistantElement = assistantEl;
   const contentEl = assistantEl.querySelector(".md-body");
   contentEl.className = "md-body";
   contentEl.textContent = "";
@@ -3458,6 +4087,10 @@ async function send() {
     assistantEl.classList.remove("streaming");
     if (finalData) {
       state.sessionId = finalData.session_id;
+      cacheSessionMessages(state.sessionId, [
+        { role: "user", content: message },
+        { role: "assistant", content: finalAnswer || finalData.answer || "" },
+      ]);
       setLivePlan(finalData.plan, finalData.plan_version, finalData.plan_revisions);
       finishExecution("success", "已完成，可查看完整工作流");
       addWorkflowPanel({
@@ -3504,6 +4137,8 @@ async function send() {
   }
   if (detachedExecutionId) {
     void reconcileDetachedExecution(detachedExecutionId, assistantEl, contentEl);
+  } else if (state.activeAssistantElement === assistantEl) {
+    state.activeAssistantElement = null;
   }
 }
 
@@ -3531,7 +4166,7 @@ function ensureCopyButton(assistantEl) {
     });
   });
   actions.appendChild(copyBtn);
-  assistantEl.appendChild(actions);
+  (assistantEl.querySelector(".assistant-content") || assistantEl).appendChild(actions);
 }
 
 function handleFrame(frame, contentEl, onComplete) {
@@ -3574,6 +4209,7 @@ function handleFrame(frame, contentEl, onComplete) {
       break;
     case "step":
       state.executionSteps = Math.max(state.executionSteps, Number(data.step) || 0);
+      recordModelUsage(data, "root:" + String(data.event_id || data.step || state.executionSteps));
       renderExecutionMetrics();
       updateExecutionStatus("running", "执行中", "第 " + String(data.step || "?") + " 轮决策完成");
       appendExecutionEvent("running", "模型完成决策", modelUsageDetail(data, data.is_final ? "正在生成最终回答" : "已确定下一步"));
@@ -3584,6 +4220,7 @@ function handleFrame(frame, contentEl, onComplete) {
       }
       break;
     case "tool.started":
+      recordToolFact(data, "pending", data.event_id);
       markToolRunning(data);
       updateExecutionStatus("running", "执行中", "正在调用工具：" + String(data.tool || ""));
       appendExecutionEvent("running", "开始调用工具：" + String(data.tool || ""), "");
@@ -3596,6 +4233,7 @@ function handleFrame(frame, contentEl, onComplete) {
       if (!updateToolCard(data.tool, data)) {
         addToolMsg(data); // 找不到则新增
       }
+      recordToolFact(data, data.success === false ? "failed" : "success", data.event_id);
       state.executionTools += 1;
       renderExecutionMetrics();
       appendExecutionEvent(
@@ -3642,6 +4280,7 @@ function setStreaming(v) {
   state.streaming = v;
   const send = $("#send");
   if (send) send.disabled = v;
+  $$(".mode-btn").forEach((button) => { button.disabled = v; });
   if (!v) state.abortCtrl = null;
   syncSessionNavigationState();
   renderExecutionHistory(state.executionHistory);
@@ -3680,6 +4319,21 @@ async function stopStreaming() {
   }
 }
 
+function bindRovingTablist(selector) {
+  const tabs = Array.from($$(selector));
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const nextIndex = event.key === "Home" ? 0
+        : event.key === "End" ? tabs.length - 1
+        : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[nextIndex].focus();
+      tabs[nextIndex].click();
+    });
+  });
+}
+
 /* ================= 事件绑定 ================= */
 function bindEvents() {
   const input = $("#input");
@@ -3712,6 +4366,7 @@ function bindEvents() {
         const active = filter === button;
         filter.classList.toggle("active", active);
         filter.setAttribute("aria-selected", String(active));
+        filter.tabIndex = active ? 0 : -1;
       });
       renderSessionList();
     });
@@ -3773,6 +4428,7 @@ function bindEvents() {
       }
     } catch (e) { /* 忽略 */ }
   }
+  const defaultInspectorTab = bindLocalSettings();
 
   const inspectorBtn = $("#toggle-inspector");
   if (inspectorBtn) {
@@ -3808,12 +4464,20 @@ function bindEvents() {
   $$('[data-inspector-tab]').forEach((button) => {
     button.addEventListener("click", () => setInspectorTab(button.dataset.inspectorTab));
   });
+  $$('[data-compact-call-view]').forEach((button) => {
+    button.addEventListener("click", () => setCompactCallView(button.dataset.compactCallView));
+  });
+  bindRovingTablist('.session-filters [role="tab"]');
+  bindRovingTablist('.inspector-section-tabs [role="tab"]');
+  bindRovingTablist('.inspector-tabs [role="tab"]');
+  bindRovingTablist('.compact-call-tabs [role="tab"]');
   document.addEventListener("keydown", (event) => {
     if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
       event.preventDefault();
       openLoadedSearch();
       return;
     }
+    if (trapLoadedSearchFocus(event)) return;
     trapInspectorFocus(event);
     if (event.key !== "Escape") return;
     if (!$("#search-dialog")?.hidden) {
@@ -3825,8 +4489,8 @@ function bindEvents() {
     }
   });
 
-  const inspectorViewport = window.matchMedia("(max-width: 920px)");
-  const navigationViewport = window.matchMedia("(max-width: 680px)");
+  const inspectorViewport = window.matchMedia("(max-width: 1279px)");
+  const navigationViewport = window.matchMedia("(max-width: 959px)");
   const syncResponsiveControls = () => {
     setInspectorCollapsed(isCompactInspectorViewport() ? !document.body.classList.contains("inspector-expanded") : document.body.classList.contains("inspector-collapsed"));
     setNavigationOpen(document.body.classList.contains("navigation-open"));
@@ -3835,11 +4499,16 @@ function bindEvents() {
     inspectorViewport.addEventListener("change", syncResponsiveControls);
     navigationViewport.addEventListener("change", syncResponsiveControls);
   }
+  bindPaneResizers();
   setInspectorCollapsed(isCompactInspectorViewport());
   setNavigationOpen(false);
   setPrimaryView(uiState.primaryView);
   setInspectorSection(uiState.inspectorSection);
-  setInspectorTab(uiState.inspectorTab);
+  setInspectorTab(defaultInspectorTab);
+  setCompactCallView(uiState.compactCallView);
+  renderCompactCalls();
+  renderInspectorRunSummary();
+  renderInspectorFiles();
 
   // 上传文件
   if (uploadBtns.length && fileInput) {
@@ -3848,7 +4517,8 @@ function bindEvents() {
       const file = fileInput.files[0];
       if (!file) return;
       if (file.size > 1024 * 1024) {
-        addErrorMsg("上传失败：文件超过全局沙箱 1MiB 限制。");
+        setPrimaryView("files");
+        setResourceFeedback("error", "上传失败：文件超过全局沙箱 1MiB 限制。");
         fileInput.value = "";
         return;
       }
@@ -3858,10 +4528,12 @@ function bindEvents() {
         const r = await fetch("/api/web/upload", { method: "POST", body: fd });
         const data = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(data.detail || "HTTP " + String(r.status));
-        addToolMsg({ tool: "upload", arguments: { file: file.name }, success: true, data: data.hint });
-        loadFiles();
+        await loadFiles();
+        setPrimaryView("files");
+        setResourceFeedback("success", "已上传 " + file.name + " 到全局沙箱。");
       } catch (e) {
-        addErrorMsg("上传失败: " + e.message);
+        setPrimaryView("files");
+        setResourceFeedback("error", "上传失败: " + e.message);
       }
       fileInput.value = "";
     });
@@ -3878,12 +4550,7 @@ function bindEvents() {
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".mode-btn").forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      state.agentMode = btn.dataset.mode;
-      $("#mode-badge").textContent = btn.dataset.mode === "plan" ? "Plan" : "ReAct";
-      const inspectorMode = $("#inspector-mode");
-      if (inspectorMode) inspectorMode.textContent = btn.dataset.mode === "plan" ? "Plan" : "ReAct";
+      if (!state.streaming) setAgentMode(btn.dataset.mode);
     });
   });
 
@@ -3906,14 +4573,19 @@ function bindEvents() {
 /* ================= 文件列表 ================= */
 async function loadFiles() {
   try {
-    const data = await fetch("/api/web/files").then((r) => r.json());
+    const response = await fetch("/api/web/files");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
     state.resources.files = Array.isArray(data.files) ? data.files : [];
-    renderList("#file-list", (data.files || []).map((f) => ({
+    renderList("#file-list", state.resources.files.map((f) => ({
       text: `${f.name} (${(f.size / 1024).toFixed(1)}KB)`,
       title: f.name,
     })));
+    renderInspectorFiles();
     renderResourceWorkspace();
-  } catch (e) { /* 忽略 */ }
+  } catch (e) {
+    setResourceFeedback("error", "文件列表读取失败: " + e.message);
+  }
 }
 
 /* ================= 会话删除 ================= */
@@ -3921,12 +4593,15 @@ async function deleteSession(sessionId) {
   if (!canChangeSession()) return;
   if (!confirm(`删除会话 ${sessionId.slice(-12)}？`)) return;
   try {
-    await fetch(`/api/web/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    const response = await fetch(`/api/web/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
     if (state.sessionId === sessionId) newSession();
+    setSessionFeedback("success", "会话已删除。");
     loadSessions();
     if (state.sessionId) loadOrchestrations(state.sessionId);
   } catch (e) {
-    addErrorMsg("删除失败: " + e.message);
+    setSessionFeedback("error", "删除失败: " + e.message);
   }
 }
 

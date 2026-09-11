@@ -4,25 +4,51 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=26">
+<link rel="stylesheet" href="/style.css?v=27">
 </head>
 <body data-theme="light">
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="icon-brand" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5.5"></circle><path d="M7.2 5.2 12 3l4.8 2.2L21 9v6l-4.2 3.8L12 21l-4.8-2.2L3 15V9z"></path></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol>
+    <symbol id="icon-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42"></path></symbol>
+    <symbol id="icon-chat" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path></symbol>
+    <symbol id="icon-agents" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"></circle><circle cx="17" cy="10" r="2.5"></circle><path d="M3 20a6 6 0 0 1 12 0M14 17a5 5 0 0 1 7 3"></path></symbol>
+    <symbol id="icon-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5-5L7.5 3.5l3 3-4 4-3-3-2.2 2.2a4 4 0 0 0 5 5L16 24l8-8z"></path></symbol>
+    <symbol id="icon-network" viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"></circle><circle cx="5" cy="18" r="2.5"></circle><circle cx="19" cy="18" r="2.5"></circle><path d="m10.8 7.2-4.6 8.6M13.2 7.2l4.6 8.6M7.5 18h9"></path></symbol>
+    <symbol id="icon-trace" viewBox="0 0 24 24"><path d="M3 12h4l2.2-6 4.2 12 2.3-6H21"></path></symbol>
+    <symbol id="icon-check-square" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"></rect><path d="m7 12 3 3 7-7"></path></symbol>
+    <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.1A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.1A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.1A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1.1.4h.1v4h-.1a1.7 1.7 0 0 0-1.7.6z"></path></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></symbol>
+    <symbol id="icon-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></symbol>
+    <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7 9m5-5 5 5M4 18v2h16v-2"></path></symbol>
+    <symbol id="icon-code" viewBox="0 0 24 24"><path d="m8 9-3 3 3 3m8-6 3 3-3 3m-2-9-4 12"></path></symbol>
+    <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5m0 0-6 6m6-6 6 6"></path></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"></path></symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6zM14 2v5h5"></path></symbol>
+    <symbol id="icon-pin" viewBox="0 0 24 24"><path d="m14 4 6 6-3 1-4 4-1 5-2-2-4 4-1-1 4-4-2-2 5-1 4-4z"></path></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4"></path></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"></path></symbol>
+  </defs>
+</svg>
 <div class="studio-shell">
   <header class="global-header" id="global-header">
     <div class="global-brand" aria-label="ReAgent">
-      <span class="brand-mark" aria-hidden="true">R</span>
+      <svg class="brand-emblem" aria-hidden="true"><use href="#icon-brand"></use></svg>
       <div><strong>ReAgent</strong><span>Build Reliable Agents</span></div>
     </div>
-    <button id="open-search" class="global-search" type="button" title="搜索已加载内容" aria-label="搜索已加载内容"><span aria-hidden="true">⌕</span><span>搜索会话、工具、Agent…</span><kbd>⌘ K</kbd></button>
+    <button id="open-search" class="global-search" type="button" title="搜索已加载内容" aria-label="搜索已加载内容"><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg><span>搜索会话、工具、Agent…</span><kbd>⌘ K</kbd></button>
     <div class="global-actions">
       <div class="connection-status global-connection" aria-live="polite"><span id="conn-status" class="status-dot"></span><span id="conn-text">正在检查连接…</span></div>
-      <button id="new-session" class="global-new-session" type="button"><span aria-hidden="true">＋</span> New Task</button>
-      <button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换深浅主题">◐</button>
+      <button id="new-session" class="global-new-session" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg> New Task</button>
+      <button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换深浅主题"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sun"></use></svg></button>
       <span class="user-avatar" aria-label="当前用户">U</span>
     </div>
   </header>
   <div id="search-dialog" class="search-dialog" role="dialog" aria-modal="true" aria-labelledby="search-dialog-title" hidden>
-    <button id="search-backdrop" class="search-backdrop" type="button" aria-label="关闭搜索"></button>
+    <button id="search-backdrop" class="search-backdrop" type="button" tabindex="-1" aria-label="关闭搜索"></button>
     <section class="search-surface">
       <div class="search-heading">
         <h2 id="search-dialog-title">搜索已加载内容</h2>
@@ -36,33 +62,35 @@
   <div class="app-shell">
     <nav class="app-rail" id="app-rail" aria-label="主要导航">
       <div class="rail-nav">
-        <button class="rail-item active" type="button" data-primary-view="chat" aria-current="page"><span aria-hidden="true">◌</span><span>Chat</span></button>
-        <button class="rail-item" type="button" data-primary-view="agents"><span aria-hidden="true">◇</span><span>Agents</span></button>
-        <button class="rail-item" type="button" data-primary-view="tools"><span aria-hidden="true">⌘</span><span>Tools</span></button>
-        <button class="rail-item" type="button" data-primary-view="mcp"><span aria-hidden="true">◍</span><span>MCP</span></button>
-        <button class="rail-item" type="button" data-primary-view="traces"><span aria-hidden="true">⌁</span><span>Traces</span></button>
-        <button class="rail-item" type="button" data-primary-view="evals" aria-disabled="true" title="评测工作台尚未接入 Web"><span aria-hidden="true">◫</span><span>Evals</span></button>
-        <button class="rail-item" type="button" data-primary-view="files"><span aria-hidden="true">□</span><span>Files</span></button>
+        <button class="rail-item active" type="button" data-primary-view="chat" aria-current="page"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chat"></use></svg><span>Chat</span></button>
+        <button class="rail-item" type="button" data-primary-view="agents"><svg class="ui-icon" aria-hidden="true"><use href="#icon-agents"></use></svg><span>Agents</span></button>
+        <button class="rail-item" type="button" data-primary-view="tools"><svg class="ui-icon" aria-hidden="true"><use href="#icon-tool"></use></svg><span>Tools</span></button>
+        <button class="rail-item" type="button" data-primary-view="mcp"><svg class="ui-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span>MCP</span></button>
+        <button class="rail-item" type="button" data-primary-view="traces"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trace"></use></svg><span>Traces</span></button>
+        <button class="rail-item" type="button" data-primary-view="evals" aria-disabled="true" title="评测工作台尚未接入 Web"><svg class="ui-icon" aria-hidden="true"><use href="#icon-check-square"></use></svg><span>Evals</span></button>
+        <button class="rail-item" type="button" data-primary-view="files"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg><span>Files</span></button>
       </div>
-      <div class="rail-bottom"><button class="rail-item" type="button" data-primary-view="settings"><span aria-hidden="true">⚙</span><span>Settings</span></button></div>
+      <div class="rail-bottom"><button class="rail-item" type="button" data-primary-view="settings"><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span>Settings</span></button></div>
     </nav>
     <aside class="sidebar context-sidebar" id="primary-navigation" aria-label="上下文导航">
       <div class="context-sidebar-header">
         <div><p class="eyebrow">Workspace</p><h2 id="context-sidebar-title">Sessions</h2></div>
-        <button class="mini-btn" type="button" data-new-session title="新建任务" aria-label="新建任务">＋</button>
+        <button class="mini-btn" type="button" data-new-session title="新建任务" aria-label="新建任务"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg></button>
       </div>
 
     <section class="sidebar-section sessions-section" data-context-view="chat" aria-labelledby="sessions-heading">
       <div class="session-filters" role="tablist" aria-label="会话筛选">
-        <button class="session-filter active" type="button" data-session-filter="recent" aria-selected="true">Recent</button>
-        <button class="session-filter" type="button" data-session-filter="pinned" aria-selected="false">Pinned</button>
-        <button class="session-filter" type="button" data-session-filter="all" aria-selected="false">All</button>
+        <button class="session-filter active" type="button" role="tab" tabindex="0" data-session-filter="recent" aria-selected="true">Recent</button>
+        <button class="session-filter" type="button" role="tab" tabindex="-1" data-session-filter="pinned" aria-selected="false">Pinned</button>
+        <button class="session-filter" type="button" role="tab" tabindex="-1" data-session-filter="all" aria-selected="false">All</button>
       </div>
+      <p id="session-feedback" class="local-feedback" role="status" aria-live="polite" hidden></p>
       <div class="section-heading">
         <h2 id="sessions-heading">最近会话</h2>
         <span class="count" id="session-count" aria-label="会话数量">0</span>
       </div>
       <ul class="cap-list session-list" id="session-list" aria-label="会话列表"></ul>
+      <p class="session-scope">最多显示最近 50 个会话；消息标题与预览只缓存在当前页面。</p>
     </section>
 
     <div class="sidebar-scroll">
@@ -104,7 +132,7 @@
       <details class="capability-group" data-context-view="files traces" open>
         <summary>文件与编排</summary>
         <section class="panel">
-          <h3>文件 <button id="upload-btn" class="mini-btn" type="button" title="上传文件到沙箱" aria-label="上传文件">↑</button></h3>
+          <h3>文件 <button id="upload-btn" class="mini-btn" type="button" data-upload-trigger title="上传文件到沙箱" aria-label="上传文件"><svg class="ui-icon" aria-hidden="true"><use href="#icon-upload"></use></svg></button></h3>
           <ul class="cap-list" id="file-list"></ul>
           <input type="file" id="file-input" hidden>
         </section>
@@ -115,6 +143,7 @@
       </details>
     </div>
   </aside>
+  <div id="sidebar-resizer" class="pane-resizer sidebar-resizer" role="separator" aria-label="调整会话栏宽度" aria-orientation="vertical" aria-controls="primary-navigation" aria-valuemin="200" aria-valuemax="340" aria-valuenow="252" tabindex="0"></div>
   <button id="navigation-backdrop" class="drawer-backdrop navigation-backdrop" type="button" aria-label="关闭会话导航" aria-hidden="true" tabindex="-1"></button>
 
   <main class="main">
@@ -128,12 +157,12 @@
         </div>
       </div>
       <div class="header-actions">
-        <button id="toggle-navigation" class="icon-btn mobile-nav-toggle" type="button" title="打开会话导航" aria-label="打开会话导航" aria-controls="primary-navigation" aria-expanded="false">☰</button>
+        <button id="toggle-navigation" class="icon-btn mobile-nav-toggle" type="button" title="打开会话导航" aria-label="打开会话导航" aria-controls="primary-navigation" aria-expanded="false"><svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg></button>
         <div class="mode-switch" role="group" aria-label="执行模式">
           <button class="mode-btn active" data-mode="react" type="button">ReAct</button>
           <button class="mode-btn" data-mode="plan" type="button">Plan</button>
         </div>
-        <button id="open-inspector" class="inspector-launch" type="button" title="查看执行过程" aria-label="查看执行过程" aria-controls="execution-panel" aria-expanded="true"><span aria-hidden="true">◫</span><span class="inspector-launch-label">执行过程</span></button>
+        <button id="open-inspector" class="inspector-launch" type="button" title="查看执行过程" aria-label="查看执行过程" aria-controls="execution-panel" aria-expanded="true"><svg class="ui-icon" aria-hidden="true"><use href="#icon-panel"></use></svg><span class="inspector-launch-label">执行过程</span></button>
       </div>
     </header>
 
@@ -153,7 +182,7 @@
 
         <div class="messages" id="messages" aria-live="polite">
           <div class="welcome">
-            <span class="welcome-mark" aria-hidden="true">R</span>
+            <svg class="brand-emblem welcome-emblem" aria-hidden="true"><use href="#icon-brand"></use></svg>
             <h2>让 Agent 的每一步都有迹可循</h2>
             <p>发送任务后，可在右侧查看决策轮次、工具调用、计划和 Trace 详情。</p>
             <div class="welcome-tips" aria-label="可用运行方式">
@@ -174,13 +203,13 @@
           <textarea id="input" placeholder="描述想让 Agent 完成的任务，Enter 发送，Shift+Enter 换行" rows="1" aria-label="任务输入"></textarea>
           <div class="composer-footer">
             <div class="composer-shortcuts" aria-label="任务快捷操作">
-              <button type="button" class="composer-icon-btn" data-composer-upload data-upload-trigger title="上传文件到全局沙箱" aria-label="上传文件">＋</button>
-              <button type="button" class="composer-icon-btn" data-composer-tools title="查看可用工具" aria-label="查看可用工具">{ }</button>
+              <button type="button" class="composer-icon-btn" data-composer-upload data-upload-trigger title="上传文件到全局沙箱" aria-label="上传文件"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg></button>
+              <button type="button" class="composer-icon-btn" data-composer-tools title="查看可用工具" aria-label="查看可用工具"><svg class="ui-icon" aria-hidden="true"><use href="#icon-code"></use></svg></button>
             </div>
             <div class="composer-actions">
               <span class="composer-runtime" title="当前默认运行时身份">General Agent</span>
               <button id="stop" class="stop-btn" type="button" style="display:none" title="停止生成">停止</button>
-              <button id="send" class="send-btn" type="button">发送 <span aria-hidden="true">↑</span></button>
+              <button id="send" class="send-btn" type="button" aria-label="发送任务" title="发送任务"><svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up"></use></svg></button>
             </div>
           </div>
         </div>
@@ -193,9 +222,11 @@
           <p id="resource-workspace-description">从左侧选择一个资源，查看当前运行时实际提供的配置与状态。</p>
         </div>
         <div id="resource-summary" class="resource-summary" aria-live="polite"></div>
+        <p id="resource-feedback" class="local-feedback" role="status" aria-live="polite" hidden></p>
         <section id="resource-content" class="resource-content" aria-label="资源详情"></section>
       </section>
 
+      <div id="inspector-resizer" class="pane-resizer inspector-resizer" role="separator" aria-label="调整执行面板宽度" aria-orientation="vertical" aria-controls="execution-panel" aria-valuemin="320" aria-valuemax="560" aria-valuenow="472" tabindex="0"></div>
       <button id="inspector-backdrop" class="drawer-backdrop inspector-backdrop" type="button" aria-label="关闭执行过程" aria-hidden="true" tabindex="-1"></button>
       <aside class="execution-panel" id="execution-panel" aria-label="执行过程" aria-hidden="false">
         <div class="execution-panel-header">
@@ -203,13 +234,13 @@
             <p class="eyebrow">Execution</p>
             <h2>实时观察</h2>
           </div>
-          <button id="toggle-inspector" class="icon-btn inspector-toggle" type="button" title="收起执行面板" aria-label="收起执行面板" aria-controls="execution-panel" aria-expanded="true">›</button>
+          <button id="toggle-inspector" class="icon-btn inspector-toggle" type="button" title="收起执行面板" aria-label="收起执行面板" aria-controls="execution-panel" aria-expanded="true"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button>
         </div>
 
         <div class="inspector-section-tabs" role="tablist" aria-label="检查器区域">
-          <button class="inspector-section-tab active" type="button" data-inspector-section="execution" aria-controls="inspector-execution-section" aria-selected="true">Execution</button>
-          <button class="inspector-section-tab" type="button" data-inspector-section="files" aria-controls="inspector-files-section" aria-selected="false">Files</button>
-          <button class="inspector-section-tab" type="button" data-inspector-section="settings" aria-controls="inspector-settings-section" aria-selected="false">Settings</button>
+          <button class="inspector-section-tab active" type="button" role="tab" tabindex="0" data-inspector-section="execution" aria-controls="inspector-execution-section" aria-selected="true">Execution</button>
+          <button class="inspector-section-tab" type="button" role="tab" tabindex="-1" data-inspector-section="files" aria-controls="inspector-files-section" aria-selected="false">Files</button>
+          <button class="inspector-section-tab" type="button" role="tab" tabindex="-1" data-inspector-section="settings" aria-controls="inspector-settings-section" aria-selected="false">Settings</button>
         </div>
 
         <section id="inspector-execution-section" data-inspector-section-panel="execution">
@@ -226,10 +257,10 @@
         </section>
 
         <div class="inspector-tabs" role="tablist" aria-label="执行详情">
-          <button class="inspector-tab active" type="button" data-inspector-tab="timeline" aria-controls="inspector-timeline-panel" aria-selected="true">Timeline</button>
-          <button class="inspector-tab" type="button" data-inspector-tab="trace" aria-controls="inspector-trace-panel" aria-selected="false">Trace</button>
-          <button class="inspector-tab" type="button" data-inspector-tab="agents" aria-controls="inspector-agents-panel" aria-selected="false">Agents</button>
-          <button class="inspector-tab" type="button" data-inspector-tab="context" aria-controls="inspector-context-panel" aria-selected="false">Context</button>
+          <button class="inspector-tab active" type="button" role="tab" tabindex="0" data-inspector-tab="timeline" aria-controls="inspector-timeline-panel" aria-selected="true">Timeline</button>
+          <button class="inspector-tab" type="button" role="tab" tabindex="-1" data-inspector-tab="trace" aria-controls="inspector-trace-panel" aria-selected="false">Trace</button>
+          <button class="inspector-tab" type="button" role="tab" tabindex="-1" data-inspector-tab="agents" aria-controls="inspector-agents-panel" aria-selected="false">Agents</button>
+          <button class="inspector-tab" type="button" role="tab" tabindex="-1" data-inspector-tab="context" aria-controls="inspector-context-panel" aria-selected="false">Context</button>
         </div>
         <div id="inspector-timeline-panel" class="inspector-tab-panel" data-inspector-tab-panel="timeline" role="tabpanel">
 
@@ -266,6 +297,16 @@
           </div>
           <div id="live-plan" class="live-plan"></div>
           <div id="plan-revision-history" class="plan-revision-history" aria-label="历史计划版本"></div>
+        </section>
+
+        <section class="inspector-section compact-calls-section" aria-labelledby="compact-calls-heading">
+          <div class="inspector-heading"><h3 id="compact-calls-heading">调用概览</h3></div>
+          <div class="compact-call-tabs" role="tablist" aria-label="调用概览视图">
+            <button class="compact-call-tab active" type="button" role="tab" tabindex="0" data-compact-call-view="graph" aria-controls="compact-call-graph" aria-selected="true">Agent Graph</button>
+            <button class="compact-call-tab" type="button" role="tab" tabindex="-1" data-compact-call-view="tools" aria-controls="compact-tool-calls" aria-selected="false">Tool Calls</button>
+          </div>
+          <div id="compact-call-graph" class="compact-call-panel" data-compact-call-panel="graph" role="tabpanel"></div>
+          <div id="compact-tool-calls" class="compact-call-panel" data-compact-call-panel="tools" role="tabpanel" hidden></div>
         </section>
 
         </div>
@@ -311,6 +352,21 @@
           </section>
         </div>
 
+        <section id="inspector-run-summary" class="inspector-section inspector-run-summary" aria-labelledby="inspector-run-summary-heading">
+          <div class="inspector-heading"><h3 id="inspector-run-summary-heading">Run Summary</h3></div>
+          <dl class="summary-facts">
+            <div><dt>Status</dt><dd id="summary-status">准备就绪</dd></div>
+            <div><dt>Mode</dt><dd id="summary-mode">ReAct</dd></div>
+            <div><dt>Decisions</dt><dd id="summary-decisions">0</dd></div>
+            <div><dt>Plan steps</dt><dd id="summary-plan-steps">0</dd></div>
+            <div><dt>Model</dt><dd id="summary-model">未采集</dd></div>
+            <div><dt>已采集调用用量</dt><dd id="summary-tokens">未采集</dd></div>
+            <div><dt>Tool Calls</dt><dd id="summary-tool-calls">0</dd></div>
+            <div><dt>Total Time</dt><dd id="summary-duration">0s</dd></div>
+            <div><dt>Cost</dt><dd id="summary-cost">— · 当前接口无成本数据</dd></div>
+          </dl>
+        </section>
+
         <section class="inspector-section inspector-note">
           <h3>可见范围</h3>
           <p>展示实际采集的决策、工具和 Trace 数据。未启用或已脱敏的内容会明确标识。</p>
@@ -318,16 +374,19 @@
         </section>
 
         <section id="inspector-files-section" class="inspector-top-panel" data-inspector-section-panel="files" hidden>
-          <div class="inspector-section inspector-empty-state">
-            <h3>Files</h3>
-            <p>文件来自当前全局沙箱；可从 Files 工作区上传和查看，不会自动作为当前任务附件。</p>
-          </div>
+          <div class="inspector-section inspector-heading"><h3>Files</h3><button class="mini-btn" type="button" data-inspector-upload data-upload-trigger aria-label="上传文件到全局沙箱"><svg class="ui-icon" aria-hidden="true"><use href="#icon-upload"></use></svg></button></div>
+          <p class="inspector-support-copy">全局沙箱文件的只读镜像；不会自动作为当前任务附件。</p>
+          <div id="inspector-file-list" class="inspector-file-list" aria-live="polite"></div>
         </section>
         <section id="inspector-settings-section" class="inspector-top-panel" data-inspector-section-panel="settings" hidden>
-          <div class="inspector-section inspector-empty-state">
-            <h3>Settings</h3>
-            <p>此处仅承载阅读偏好；模型、密钥与运行时配置不在前端修改。</p>
+          <div class="inspector-section inspector-heading"><h3>Settings</h3></div>
+          <p class="inspector-support-copy">仅调整当前浏览器的阅读偏好；不修改模型、密钥或运行时配置。</p>
+          <div class="local-settings">
+            <button id="settings-theme-toggle" class="settings-row" type="button"><span>界面主题</span><strong>切换深浅主题</strong></button>
+            <label class="settings-row" for="settings-default-tab"><span>默认 Inspector Tab</span><select id="settings-default-tab"><option value="timeline">Timeline</option><option value="trace">Trace</option><option value="agents">Agents</option><option value="context">Context</option></select></label>
+            <button id="clear-local-preferences" class="settings-row danger" type="button"><span>本地偏好</span><strong>恢复默认</strong></button>
           </div>
+          <p id="settings-feedback" class="local-feedback" role="status" aria-live="polite" hidden></p>
         </section>
       </aside>
     </div>
@@ -336,6 +395,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=26"></script>
+<script src="/app.js?v=27"></script>
 </body>
 </html>
