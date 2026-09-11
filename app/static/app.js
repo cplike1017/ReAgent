@@ -26,7 +26,38 @@ const state = {
   planRevisionReasons: new Map(),
   orchestrationRuns: new Map(),
   executionContext: null,
+  executionTrace: null,
+  executionTraceId: null,
+  sessions: [],
+  sessionFilter: "recent",
+  sessionMetadata: {},
+  searchReturnFocus: null,
+  resources: {
+    tools: [],
+    skills: [],
+    mcp: [],
+    agents: [],
+    files: [],
+  },
 };
+
+const uiState = {
+  primaryView: "chat",
+  inspectorSection: "execution",
+  inspectorTab: "timeline",
+};
+
+const PRIMARY_VIEW_COPY = Object.freeze({
+  chat: ["Sessions", "在当前会话中发起任务并观察真实执行过程。"],
+  agents: ["Agents", "查看当前运行时已提供的子 Agent 档案。"],
+  tools: ["Tools", "查看当前运行时已提供的工具与技能。"],
+  mcp: ["MCP", "查看当前已连接的 MCP Server。"],
+  traces: ["Traces", "查看当前会话的执行记录与编排历史。"],
+  files: ["Files", "查看全局沙箱文件；文件不会自动成为任务附件。"],
+  settings: ["Settings", "仅调整前端阅读偏好，不修改模型、密钥或运行时配置。"],
+});
+
+const SESSION_METADATA_STORAGE_KEY = "reagent-session-metadata-v1";
 
 const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
 const TERMINAL_EXECUTION_OUTCOMES = Object.freeze({
@@ -48,6 +79,294 @@ const INSPECTOR_FOCUSABLE_SELECTOR = [
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
+function setPrimaryView(view) {
+  if (!Object.prototype.hasOwnProperty.call(PRIMARY_VIEW_COPY, view)) return;
+  uiState.primaryView = view;
+  document.body.dataset.primaryView = view;
+  $$('[data-primary-view]').forEach((button) => {
+    const active = button.dataset.primaryView === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-current", active ? "page" : "false");
+  });
+  $$('[data-context-view]').forEach((element) => {
+    const visible = String(element.dataset.contextView || "").split(/\s+/).includes(view);
+    element.hidden = !visible;
+  });
+  const chatView = $("#chat-view");
+  const resourceView = $("#resource-workspace");
+  if (chatView) chatView.hidden = view !== "chat";
+  if (resourceView) resourceView.hidden = view === "chat";
+  const [title, description] = PRIMARY_VIEW_COPY[view];
+  const contextTitle = $("#context-sidebar-title");
+  const resourceTitle = $("#resource-workspace-title");
+  const resourceDescription = $("#resource-workspace-description");
+  if (contextTitle) contextTitle.textContent = title;
+  if (resourceTitle) resourceTitle.textContent = title;
+  if (resourceDescription) resourceDescription.textContent = description;
+  renderResourceWorkspace();
+}
+
+function createResourceCard(title, description, meta, onActivate) {
+  const card = document.createElement(onActivate ? "button" : "article");
+  card.className = "resource-card";
+  if (onActivate) {
+    card.type = "button";
+    card.addEventListener("click", onActivate);
+  }
+  const titleEl = document.createElement("strong");
+  titleEl.textContent = title;
+  const descriptionEl = document.createElement("p");
+  descriptionEl.textContent = description || "暂无补充说明";
+  const metaEl = document.createElement("span");
+  metaEl.className = "resource-card-meta";
+  metaEl.textContent = meta;
+  card.append(titleEl, descriptionEl, metaEl);
+  return card;
+}
+
+function appendResourceSection(container, title, items, emptyCopy) {
+  const section = document.createElement("section");
+  section.className = "resource-section";
+  const heading = document.createElement("div");
+  heading.className = "resource-section-heading";
+  const headingTitle = document.createElement("h3");
+  headingTitle.textContent = title;
+  const count = document.createElement("span");
+  count.textContent = String(items.length);
+  heading.append(headingTitle, count);
+  section.appendChild(heading);
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "resource-empty";
+    empty.textContent = emptyCopy;
+    section.appendChild(empty);
+  } else {
+    const cards = document.createElement("div");
+    cards.className = "resource-card-grid";
+    items.forEach((item) => cards.appendChild(item));
+    section.appendChild(cards);
+  }
+  container.appendChild(section);
+}
+
+function renderResourceWorkspace() {
+  const summary = $("#resource-summary");
+  const content = $("#resource-content");
+  if (!summary || !content || uiState.primaryView === "chat") return;
+  content.replaceChildren();
+  const view = uiState.primaryView;
+  const resources = state.resources;
+
+  if (view === "tools") {
+    summary.textContent = String(resources.tools.length) + " 个工具 · " + String(resources.skills.length) + " 项技能";
+    appendResourceSection(content, "Tools", resources.tools.map((tool) => createResourceCard(
+      tool.name,
+      tool.description,
+      (tool.risk_level || "low") + " 风险 · " + (tool.required_permission || "无需额外权限"),
+    )), "当前运行时未提供工具。");
+    appendResourceSection(content, "Skills", resources.skills.map((skill) => createResourceCard(
+      skill.name,
+      skill.description,
+      "v" + (skill.version || "unknown") + (Array.isArray(skill.triggers) && skill.triggers.length ? " · " + skill.triggers.join("、") : " · 无触发词"),
+    )), "当前运行时未加载技能。");
+    return;
+  }
+
+  if (view === "mcp") {
+    summary.textContent = String(resources.mcp.length) + " 个已连接 Server";
+    appendResourceSection(content, "MCP Servers", resources.mcp.map((server) => createResourceCard(
+      server.name,
+      "当前连接可用；工具由 Server 在运行时提供。",
+      (server.transport || "unknown") + " · " + String(server.tool_count || 0) + " 个工具",
+    )), "当前没有已连接的 MCP Server。");
+    return;
+  }
+
+  if (view === "agents") {
+    summary.textContent = String(resources.agents.length) + " 个可用 Agent 档案";
+    appendResourceSection(content, "Agent Profiles", resources.agents.map((agent) => createResourceCard(
+      agent.name,
+      agent.description,
+      (agent.builtin ? "内置" : "自定义") + " · 最多 " + String(agent.max_steps || 0) + " 步 · " + (Array.isArray(agent.allowed_tools) ? agent.allowed_tools.join("、") || "无工具" : "全部工具"),
+    )), "当前运行时未启用子 Agent 档案。");
+    return;
+  }
+
+  if (view === "files") {
+    summary.textContent = String(resources.files.length) + " 个全局沙箱文件";
+    const actions = document.createElement("div");
+    actions.className = "resource-workspace-actions";
+    const upload = document.createElement("button");
+    upload.type = "button";
+    upload.className = "resource-primary-action";
+    upload.dataset.resourceAction = "upload";
+    upload.textContent = "上传文件";
+    actions.appendChild(upload);
+    content.appendChild(actions);
+    appendResourceSection(content, "Sandbox Files", resources.files.map((file) => createResourceCard(
+      file.name,
+      "文件位于全局沙箱；发送任务时不会自动附加。",
+      formatFileSize(file.size),
+    )), "全局沙箱目前没有文件。");
+    return;
+  }
+
+  if (view === "traces") {
+    const records = state.executionHistory;
+    summary.textContent = String(records.length) + " 条当前会话执行记录";
+    appendResourceSection(content, "Execution history", records.map((record) => createResourceCard(
+      record.input_preview || record.execution_id,
+      "选择后将在 Inspector 回放该次执行的真实 Timeline、Trace 与 Context。",
+      formatMode(record.agent_mode) + " · " + formatStoredStatus(record.status) + (record.created_at ? " · " + formatStoredTime(record.created_at) : ""),
+      () => {
+        if (!canOpenExecutionHistory(record.execution_id)) return;
+        setPrimaryView("chat");
+        setInspectorSection("execution");
+        setInspectorTab("trace");
+        setInspectorCollapsed(false, true);
+        void openExecutionHistory(record.execution_id);
+      },
+    )), "当前会话还没有可回放的执行记录。");
+    return;
+  }
+
+  if (view === "settings") {
+    const theme = document.body.dataset.theme === "dark" ? "深色" : "浅色";
+    summary.textContent = "仅包含本地阅读偏好";
+    appendResourceSection(content, "Local preferences", [createResourceCard(
+      "界面主题",
+      "当前为" + theme + "主题；可使用顶部按钮切换。模型、密钥与运行时配置不会在此页面修改。",
+      "浏览器本地显示偏好",
+    )], "");
+    return;
+  }
+
+  summary.textContent = "该工作区暂未开放。";
+}
+
+function collectLoadedSearchEntities() {
+  const sessions = state.sessions.map((session) => ({
+    kind: "session",
+    view: "chat",
+    title: sessionTitle(session),
+    detail: session.updated_at ? "会话 · " + formatStoredTime(session.updated_at) : "会话",
+    searchText: [sessionTitle(session), session.session_id, session.updated_at].join(" "),
+    sessionId: session.session_id,
+  }));
+  const resources = state.resources;
+  const entries = [
+    ...resources.tools.map((tool) => ({ kind: "tool", view: "tools", title: tool.name, detail: tool.description || "工具", searchText: [tool.name, tool.description].join(" ") })),
+    ...resources.skills.map((skill) => ({ kind: "skill", view: "tools", title: skill.name, detail: skill.description || "技能", searchText: [skill.name, skill.description, ...(skill.triggers || [])].join(" ") })),
+    ...resources.agents.map((agent) => ({ kind: "agent", view: "agents", title: agent.name, detail: agent.description || "Agent 档案", searchText: [agent.name, agent.description, ...(agent.allowed_tools || [])].join(" ") })),
+    ...resources.mcp.map((server) => ({ kind: "mcp", view: "mcp", title: server.name, detail: (server.transport || "unknown") + " · " + String(server.tool_count || 0) + " 个工具", searchText: [server.name, server.transport].join(" ") })),
+    ...resources.files.map((file) => ({ kind: "file", view: "files", title: file.name, detail: formatFileSize(file.size), searchText: file.name })),
+  ];
+  return [...sessions, ...entries];
+}
+
+function closeLoadedSearch(restoreFocus = true) {
+  const dialog = $("#search-dialog");
+  if (!dialog || dialog.hidden) return;
+  dialog.hidden = true;
+  document.body.classList.remove("search-open");
+  if (restoreFocus && state.searchReturnFocus && typeof state.searchReturnFocus.focus === "function") {
+    state.searchReturnFocus.focus();
+  }
+  state.searchReturnFocus = null;
+}
+
+function openLoadedSearch() {
+  const dialog = $("#search-dialog");
+  const input = $("#search-input");
+  if (!dialog || !input || !dialog.hidden) return;
+  state.searchReturnFocus = document.activeElement;
+  setNavigationOpen(false);
+  dialog.hidden = false;
+  document.body.classList.add("search-open");
+  input.value = "";
+  renderLoadedSearchResults();
+  window.requestAnimationFrame(() => input.focus());
+}
+
+function renderLoadedSearchResults() {
+  const input = $("#search-input");
+  const results = $("#search-results");
+  if (!input || !results) return;
+  const query = input.value.trim().toLocaleLowerCase();
+  const entities = collectLoadedSearchEntities();
+  const matches = query ? entities.filter((entry) => entry.searchText.toLocaleLowerCase().includes(query)) : entities.slice(0, 12);
+  results.replaceChildren();
+  if (!matches.length) {
+    const empty = document.createElement("p");
+    empty.className = "search-empty";
+    empty.textContent = "没有匹配项；仅搜索已加载内容。";
+    results.appendChild(empty);
+    return;
+  }
+  const labels = { session: "Sessions", agent: "Agents", tool: "Tools", skill: "Skills", mcp: "MCP", file: "Files" };
+  const groups = new Map();
+  matches.forEach((entry) => {
+    const group = groups.get(entry.kind) || [];
+    group.push(entry);
+    groups.set(entry.kind, group);
+  });
+  groups.forEach((entries, kind) => {
+    const section = document.createElement("section");
+    section.className = "search-result-group";
+    const heading = document.createElement("h3");
+    heading.textContent = labels[kind];
+    section.appendChild(heading);
+    entries.forEach((entry) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "search-result";
+      const title = document.createElement("strong");
+      title.textContent = entry.title;
+      const detail = document.createElement("span");
+      detail.textContent = entry.detail;
+      item.append(title, detail);
+      item.addEventListener("click", () => {
+        if (entry.kind === "session") {
+          if (!canChangeSession()) return;
+          closeLoadedSearch(false);
+          void openSession(entry.sessionId);
+          return;
+        }
+        closeLoadedSearch(false);
+        setPrimaryView(entry.view);
+      });
+      section.appendChild(item);
+    });
+    results.appendChild(section);
+  });
+}
+
+function setInspectorSection(section) {
+  if (!new Set(["execution", "files", "settings"]).has(section)) return;
+  uiState.inspectorSection = section;
+  $$('[data-inspector-section]').forEach((button) => {
+    const active = button.dataset.inspectorSection === section;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $$('[data-inspector-section-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.inspectorSectionPanel !== section;
+  });
+}
+
+function setInspectorTab(tab) {
+  if (!new Set(["timeline", "trace", "agents", "context"]).has(tab)) return;
+  uiState.inspectorTab = tab;
+  $$('[data-inspector-tab]').forEach((button) => {
+    const active = button.dataset.inspectorTab === tab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  $$('[data-inspector-tab-panel]').forEach((panel) => {
+    panel.hidden = panel.dataset.inspectorTabPanel !== tab;
+  });
+}
+
 function advanceExecutionViewVersion() {
   state.executionViewVersion += 1;
   return state.executionViewVersion;
@@ -62,11 +381,10 @@ function canChangeSession() {
 }
 
 function syncSessionNavigationState() {
-  const newSession = $("#new-session");
-  if (newSession) {
+  $$("#new-session, [data-new-session]").forEach((newSession) => {
     newSession.disabled = !canChangeSession();
     newSession.title = canChangeSession() ? "新建会话" : "当前任务仍在执行；结束或停止后可切换会话";
-  }
+  });
   $$("#session-list .session-item").forEach((item) => {
     const locked = !canChangeSession();
     item.setAttribute("aria-disabled", String(locked));
@@ -77,6 +395,8 @@ function syncSessionNavigationState() {
 
 /* ================= 初始化 ================= */
 async function init() {
+  renderWelcome();
+  state.sessionMetadata = loadSessionMetadata();
   const [capabilitiesReady] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents()]);
   // 连接状态必须来自真实 API 响应，不能在失败后被无条件覆盖为“已连接”。
   setConnStatus(capabilitiesReady === true);
@@ -147,6 +467,7 @@ function startExecution(data) {
   clearLivePlan();
   clearLiveOrchestrations();
   clearExecutionContext();
+  clearExecutionTrace();
   const title = $("#workspace-title");
   if (title && data.message_preview) title.textContent = truncateForWorkspace(data.message_preview);
   updateExecutionStatus("pending", "正在提交", "正在提交任务");
@@ -570,10 +891,77 @@ function clearExecutionContext() {
   const section = $("#execution-context-section");
   const list = $("#execution-context");
   const meta = $("#execution-context-meta");
+  const empty = $("#context-empty-state");
   state.executionContext = createExecutionContextState();
   if (list) list.replaceChildren();
   if (meta) meta.textContent = "未采集";
   if (section) section.hidden = true;
+  if (empty) empty.hidden = false;
+}
+
+function clearExecutionTrace() {
+  state.executionTrace = null;
+  state.executionTraceId = null;
+  renderExecutionTrace();
+}
+
+function setExecutionTrace(trace, traceId) {
+  state.executionTrace = trace && typeof trace === "object" ? trace : null;
+  state.executionTraceId = traceId ? String(traceId) : null;
+  renderExecutionTrace();
+}
+
+function renderExecutionTrace() {
+  const container = $("#execution-trace");
+  const meta = $("#execution-trace-meta");
+  if (!container || !meta) return;
+  container.replaceChildren();
+
+  const trace = state.executionTrace;
+  const spans = trace && Array.isArray(trace.spans) ? trace.spans : [];
+  if (!trace) {
+    meta.textContent = state.executionTraceId ? "加载失败" : "未采集";
+    const empty = document.createElement("p");
+    empty.className = "inspector-empty-copy";
+    empty.textContent = state.executionTraceId
+      ? "Trace 已记录，但当前无法读取调用树。"
+      : "选择一次执行后，这里会显示已采集的调用树。未启用或未生成的 Trace 会明确标识。";
+    container.appendChild(empty);
+    return;
+  }
+  if (!spans.length) {
+    meta.textContent = "无 Span";
+    const empty = document.createElement("p");
+    empty.className = "inspector-empty-copy";
+    empty.textContent = "本次运行未采集到可展示的 Trace Span。";
+    container.appendChild(empty);
+    return;
+  }
+
+  const totalDuration = Math.max(spans.reduce((sum, span) => sum + (Number(span.duration_ms) || 0), 0), 1);
+  const tree = document.createElement("div");
+  tree.className = "trace-tree";
+  tree.innerHTML = spans.map((span) => renderTraceNodeV2(span, 0, totalDuration)).join("");
+  container.appendChild(tree);
+  meta.textContent = String(spans.length) + " 个根 Span";
+  bindTreeToggles(tree);
+}
+
+async function fetchExecutionTrace(traceId, viewVersion = state.executionViewVersion) {
+  if (!traceId) return;
+  state.executionTraceId = String(traceId);
+  renderExecutionTrace();
+  try {
+    const response = await fetch("/api/web/traces/" + encodeURIComponent(traceId));
+    if (!response.ok) throw new Error("HTTP " + String(response.status));
+    const trace = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionTraceId !== String(traceId)) return;
+    setExecutionTrace(trace, traceId);
+  } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.executionTraceId !== String(traceId)) return;
+    state.executionTrace = null;
+    renderExecutionTrace();
+  }
 }
 
 function createContextFact(title, value, detail, kind = "") {
@@ -600,6 +988,7 @@ function renderExecutionContext() {
   const section = $("#execution-context-section");
   const list = $("#execution-context");
   const meta = $("#execution-context-meta");
+  const empty = $("#context-empty-state");
   if (!section || !list || !meta) return;
   const facts = state.executionContext || createExecutionContextState();
   const entries = [];
@@ -623,11 +1012,13 @@ function renderExecutionContext() {
   if (!entries.length) {
     section.hidden = true;
     meta.textContent = "未采集";
+    if (empty) empty.hidden = false;
     return;
   }
   entries.forEach(([title, value, detail, kind]) => list.appendChild(createContextFact(title, value, detail, kind)));
   section.hidden = false;
   meta.textContent = String(entries.length) + " 项事实";
+  $("#context-empty-state").hidden = entries.length > 0;
 }
 
 function applyRuntimeLifecycleEvent(type, payload, timestamp) {
@@ -776,10 +1167,12 @@ function clearLiveOrchestrations() {
   const section = $("#live-orchestration-section");
   const list = $("#live-orchestrations");
   const meta = $("#live-orchestration-meta");
+  const empty = $("#agents-empty-state");
   state.orchestrationRuns.clear();
   if (list) list.replaceChildren();
   if (meta) meta.textContent = "0 个编排";
   if (section) section.hidden = true;
+  if (empty) empty.hidden = false;
 }
 
 function renderOrchestrationAgent(agent) {
@@ -833,10 +1226,56 @@ function renderOrchestrationAgent(agent) {
   return item;
 }
 
+function renderOrchestrationDependencyGraph(agents) {
+  const graph = document.createElement("section");
+  graph.className = "agent-dependency-graph";
+  const heading = document.createElement("h4");
+  heading.textContent = "依赖关系";
+  graph.appendChild(heading);
+
+  const nodeList = document.createElement("div");
+  nodeList.className = "agent-dependency-nodes";
+  const agentsByStep = new Map();
+  agents.forEach((agent) => {
+    agentsByStep.set(agent.stepIndex, agent);
+    const node = document.createElement("span");
+    node.className = "agent-dependency-node " + orchestrationStateName(agent.status);
+    node.textContent = String(agent.stepIndex + 1) + " · " + agent.profile;
+    nodeList.appendChild(node);
+  });
+  graph.appendChild(nodeList);
+
+  const edges = document.createElement("div");
+  edges.className = "agent-dependency-edges";
+  let edgeCount = 0;
+  agents.forEach((agent) => {
+    const upstream = [];
+    agent.dependsOn.forEach((stepIndex) => {
+      const source = agentsByStep.get(Number(stepIndex));
+      if (source) upstream.push(source);
+    });
+    if (!upstream.length) return;
+    const edge = document.createElement("span");
+    edge.className = "agent-dependency-edge";
+    edge.textContent = upstream.map((source) => "步骤 " + String(source.stepIndex + 1)).join("、") + " → 步骤 " + String(agent.stepIndex + 1);
+    edges.appendChild(edge);
+    edgeCount += 1;
+  });
+  if (!edgeCount) {
+    const empty = document.createElement("span");
+    empty.className = "agent-dependency-empty";
+    empty.textContent = "本次计划未声明跨 Agent 依赖";
+    edges.appendChild(empty);
+  }
+  graph.appendChild(edges);
+  return graph;
+}
+
 function renderLiveOrchestrations() {
   const section = $("#live-orchestration-section");
   const list = $("#live-orchestrations");
   const meta = $("#live-orchestration-meta");
+  const empty = $("#agents-empty-state");
   if (!section || !list || !meta) return;
   const runs = [...state.orchestrationRuns.values()].sort((left, right) => {
     if (left.depth !== right.depth) return left.depth - right.depth;
@@ -846,12 +1285,14 @@ function renderLiveOrchestrations() {
     section.hidden = true;
     meta.textContent = "0 个编排";
     list.replaceChildren();
+    if (empty) empty.hidden = false;
     return;
   }
 
   const running = runs.filter((run) => orchestrationStateName(run.status) === "running").length;
   meta.textContent = String(runs.length) + " 个编排" + (running ? " · " + String(running) + " 运行中" : "");
   section.hidden = false;
+  $("#agents-empty-state").hidden = runs.length > 0;
   list.replaceChildren();
 
   runs.forEach((run) => {
@@ -894,6 +1335,7 @@ function renderLiveOrchestrations() {
       ...run.planOrder.map((id) => run.agents.get(id)).filter(Boolean),
       ...[...run.agents.values()].filter((agent) => !run.planOrder.includes(agent.id)),
     ];
+    if (orderedAgents.length) body.appendChild(renderOrchestrationDependencyGraph(orderedAgents));
     orderedAgents.forEach((agent) => agentList.appendChild(renderOrchestrationAgent(agent)));
     if (orderedAgents.length) body.appendChild(agentList);
     details.appendChild(body);
@@ -1054,6 +1496,7 @@ function canOpenExecutionHistory(executionId) {
 
 function renderExecutionHistory(records) {
   state.executionHistory = Array.isArray(records) ? records : [];
+  renderResourceWorkspace();
   const container = $("#execution-history");
   const count = $("#execution-history-count");
   if (!container || !count) return;
@@ -1273,6 +1716,7 @@ function replayExecutionFrame(frame, viewVersion = state.executionViewVersion) {
 }
 
 function replayExecution(record, events) {
+  advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = record.execution_id;
   state.sessionId = record.session_id || state.sessionId;
@@ -1286,6 +1730,7 @@ function replayExecution(record, events) {
   clearLivePlan();
   clearLiveOrchestrations();
   clearExecutionContext();
+  clearExecutionTrace();
 
   const title = $("#workspace-title");
   if (title) title.textContent = truncateForWorkspace(record.input_preview || "历史执行");
@@ -1295,6 +1740,7 @@ function replayExecution(record, events) {
   updateExecutionStatus("running", "回放中", "正在还原已采集的执行事件");
 
   events.forEach((event) => replayExecutionEvent(event));
+  if (record.trace_id) void fetchExecutionTrace(record.trace_id, state.executionViewVersion);
   const status = record.status;
   if (status === "SUCCEEDED") finishExecution("success", "历史执行已完成");
   else if (status === "FAILED" || status === "INTERRUPTED") finishExecution("error", status === "INTERRUPTED" ? "执行被服务重启中断" : "历史执行失败");
@@ -1359,6 +1805,7 @@ function replayExecutionEvent(event) {
   }
   if (type === "done") {
     setLivePlan(payload.plan, payload.plan_version, payload.plan_revisions);
+    setExecutionTrace(payload.trace, payload.trace_id);
     appendExecutionEvent("success", "任务已完成", "", timestamp);
     return;
   }
@@ -1404,6 +1851,9 @@ async function loadCapabilities() {
       throw new Error("能力接口返回失败");
     }
     const [tools, skills, mcp] = await Promise.all(responses.map((response) => response.json()));
+    state.resources.tools = Array.isArray(tools.tools) ? tools.tools : [];
+    state.resources.skills = Array.isArray(skills.skills) ? skills.skills : [];
+    state.resources.mcp = Array.isArray(mcp.servers) ? mcp.servers : [];
     renderList("#tool-list", (tools.tools || []).map((t) => ({
       text: t.name + (t.risk_level !== "low" ? ` [${t.risk_level}]` : ""),
       title: t.description,
@@ -1417,6 +1867,7 @@ async function loadCapabilities() {
       text: `${s.name} (${s.tool_count})`, title: `transport: ${s.transport}`,
     })));
     $("#mcp-count").textContent = mcp.count;
+    renderResourceWorkspace();
     return true;
   } catch (e) {
     return false;
@@ -1427,6 +1878,7 @@ async function loadCapabilities() {
 async function loadAgents() {
   try {
     const data = await fetch("/api/web/agents").then((r) => r.json());
+    state.resources.agents = Array.isArray(data.agents) ? data.agents : [];
     const ul = $("#agent-list");
     ul.innerHTML = "";
     (data.agents || []).forEach((a) => {
@@ -1445,6 +1897,7 @@ async function loadAgents() {
       });
       ul.appendChild(li);
     });
+    renderResourceWorkspace();
   } catch (e) { /* 忽略 */ }
 }
 
@@ -1509,39 +1962,156 @@ function renderList(sel, items) {
 }
 
 /* ================= 会话 ================= */
-async function loadSessions() {
+function loadSessionMetadata() {
   try {
-    const data = await fetch("/api/web/sessions").then((r) => r.json());
-    const ul = $("#session-list");
-    ul.innerHTML = "";
-    const count = $("#session-count");
-    if (count) count.textContent = String((data.sessions || []).length);
-    (data.sessions || []).forEach((s) => {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_METADATA_STORAGE_KEY) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const cleaned = {};
+    Object.entries(parsed).forEach(([sessionId, metadata]) => {
+      if (!metadata || typeof metadata !== "object") return;
+      const alias = typeof metadata.alias === "string" ? metadata.alias.trim().slice(0, 80) : "";
+      const pinned = metadata.pinned === true;
+      if (alias || pinned) cleaned[sessionId] = { alias, pinned };
+    });
+    return cleaned;
+  } catch (error) {
+    return {};
+  }
+}
+
+function saveSessionMetadata() {
+  try {
+    localStorage.setItem(SESSION_METADATA_STORAGE_KEY, JSON.stringify(state.sessionMetadata));
+  } catch (error) {
+    // 浏览器禁用或写满 localStorage 时，仍保留当前页面内的偏好。
+  }
+}
+
+function sessionMetadataFor(sessionId) {
+  return state.sessionMetadata[sessionId] || { alias: "", pinned: false };
+}
+
+function sessionTitle(session) {
+  const alias = sessionMetadataFor(session.session_id).alias;
+  return alias || session.session_id.slice(-16);
+}
+
+function updateSessionMetadata(sessionId, patch) {
+  const current = sessionMetadataFor(sessionId);
+  const next = {
+    alias: typeof patch.alias === "string" ? patch.alias.trim().slice(0, 80) : current.alias,
+    pinned: typeof patch.pinned === "boolean" ? patch.pinned : current.pinned,
+  };
+  if (next.alias || next.pinned) state.sessionMetadata[sessionId] = next;
+  else delete state.sessionMetadata[sessionId];
+  saveSessionMetadata();
+  renderSessionList();
+  if (!$("#search-dialog")?.hidden) renderLoadedSearchResults();
+}
+
+function sessionGroupLabel(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "较早";
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const sessionDay = new Date(date);
+  sessionDay.setHours(0, 0, 0, 0);
+  const daysAgo = Math.round((today.getTime() - sessionDay.getTime()) / 86400000);
+  if (daysAgo <= 0) return "今天";
+  if (daysAgo === 1) return "昨天";
+  if (daysAgo <= 7) return "最近 7 天";
+  return "较早";
+}
+
+function filteredSessions() {
+  const filter = state.sessionFilter;
+  return state.sessions.filter((session) => {
+    const metadata = sessionMetadataFor(session.session_id);
+    if (filter === "pinned") return metadata.pinned;
+    if (filter === "recent") {
+      const date = new Date(session.updated_at);
+      if (Number.isNaN(date.getTime())) return false;
+      return Date.now() - date.getTime() <= 7 * 86400000;
+    }
+    return true;
+  });
+}
+
+function renderSessionList() {
+  const ul = $("#session-list");
+  const count = $("#session-count");
+  const heading = $("#sessions-heading");
+  if (!ul || !count || !heading) return;
+  const sessions = filteredSessions();
+  count.textContent = String(sessions.length);
+  heading.textContent = state.sessionFilter === "pinned" ? "本地置顶" : state.sessionFilter === "all" ? "已加载会话" : "最近会话";
+  ul.replaceChildren();
+  const groups = new Map();
+  sessions.forEach((session) => {
+    const label = state.sessionFilter === "pinned" ? "已置顶" : sessionGroupLabel(session.updated_at);
+    const group = groups.get(label) || [];
+    group.push(session);
+    groups.set(label, group);
+  });
+  groups.forEach((group, label) => {
+    const groupHeading = document.createElement("li");
+    groupHeading.className = "session-group-heading";
+    groupHeading.textContent = label;
+    groupHeading.setAttribute("aria-hidden", "true");
+    ul.appendChild(groupHeading);
+    group.forEach((session) => {
+      const metadata = sessionMetadataFor(session.session_id);
       const li = document.createElement("li");
       li.className = "session-item";
-      li.dataset.sessionId = s.session_id;
+      li.dataset.sessionId = session.session_id;
+      li.tabIndex = 0;
+      li.setAttribute("role", "button");
+      li.setAttribute("aria-label", "打开会话：" + sessionTitle(session));
       li.innerHTML = `
         <span class="si-icon">💬</span>
-        <span class="si-name">${esc(s.session_id.slice(-16))}</span>
-        <span class="si-time">${esc((s.updated_at || "").slice(11, 19))}</span>
-        <span class="si-del" title="删除会话">✕</span>
+        <span class="si-name">${esc(sessionTitle(session))}</span>
+        <span class="si-time">${esc((session.updated_at || "").slice(11, 19))}</span>
+        <span class="si-pin${metadata.pinned ? " active" : ""}" data-session-pin title="${metadata.pinned ? "取消本地置顶" : "本地置顶"}">${metadata.pinned ? "★" : "☆"}</span>
+        <span class="si-alias" data-session-alias title="编辑本地名称">✎</span>
+        <span class="si-del" data-session-delete title="删除会话">✕</span>
       `;
-      if (state.sessionId === s.session_id) li.classList.add("active");
+      if (state.sessionId === session.session_id) li.classList.add("active");
       const sessionLocked = !canChangeSession();
       li.setAttribute("aria-disabled", String(sessionLocked));
       if (sessionLocked) li.title = "当前任务仍在执行；结束或停止后可切换会话";
-      li.addEventListener("click", (e) => {
-        if (!canChangeSession()) return;
-        if (e.target.classList.contains("si-del")) {
-          e.stopPropagation();
-          deleteSession(s.session_id);
+      const activate = (event) => {
+        const action = event.target.closest("[data-session-pin], [data-session-alias], [data-session-delete]");
+        if (action) {
+          event.stopPropagation();
+          if (action.matches("[data-session-pin]")) updateSessionMetadata(session.session_id, { pinned: !metadata.pinned });
+          if (action.matches("[data-session-alias]")) {
+            const alias = window.prompt("仅此浏览器显示的会话名称", metadata.alias || "");
+            if (alias !== null) updateSessionMetadata(session.session_id, { alias });
+          }
+          if (action.matches("[data-session-delete]") && canChangeSession()) void deleteSession(session.session_id);
           return;
         }
-        openSession(s.session_id);
+        if (canChangeSession()) void openSession(session.session_id);
+      };
+      li.addEventListener("click", activate);
+      li.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate(event);
+        }
       });
       ul.appendChild(li);
     });
-    syncSessionNavigationState();
+  });
+  syncSessionNavigationState();
+}
+
+async function loadSessions() {
+  try {
+    const data = await fetch("/api/web/sessions").then((r) => r.json());
+    state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    renderSessionList();
+    if (!$("#search-dialog")?.hidden) renderLoadedSearchResults();
   } catch (e) { /* 忽略 */ }
 }
 
@@ -1798,6 +2368,7 @@ function toolHistoryToCardData(message, declaredCall) {
 
 function newSession() {
   if (!canChangeSession()) return;
+  setPrimaryView("chat");
   advanceExecutionViewVersion();
   state.sessionId = null;
   state.executionId = null;
@@ -1809,13 +2380,11 @@ function newSession() {
   state.executionTools = 0;
   state.followLatest = true;
   clearLivePlan();
+  clearLiveOrchestrations();
+  clearExecutionContext();
+  clearExecutionTrace();
   setNavigationOpen(false);
-  $("#messages").innerHTML = `
-    <div class="welcome">
-      <h2>🤖 ReAgent</h2>
-      <p>ReAct / Plan 双模式 · 记忆 · MCP · 技能 · 多 Agent 编排</p>
-      <p class="sub">工作流完全透明：每步决策、工具调用、耗时、Trace 树实时可见</p>
-    </div>`;
+  $("#messages").innerHTML = renderWelcome();
   $$("#session-list .session-item").forEach((el) => el.classList.remove("active"));
   // 清空编排记录列表
   $("#orch-list").innerHTML = "";
@@ -1825,7 +2394,27 @@ function newSession() {
 }
 
 /* ================= 消息渲染 ================= */
+function renderWelcome() {
+  return `
+    <div class="welcome">
+      <span class="welcome-mark" aria-hidden="true">R</span>
+      <h2>让 Agent 的每一步都有迹可循</h2>
+      <p>发送任务后，可在右侧查看决策轮次、工具调用、计划和 Trace 详情。</p>
+      <div class="welcome-tips" aria-label="可用运行方式">
+        <span>ReAct：边思考边调用工具</span>
+        <span>Plan：先分解，再逐步执行</span>
+        <span>支持多 Agent 编排</span>
+      </div>
+      <div class="welcome-examples" aria-label="任务示例">
+        <button type="button" class="welcome-example" data-welcome-prompt="调研 Agent memory 的主流实现方案并比较优缺点">技术调研</button>
+        <button type="button" class="welcome-example" data-welcome-prompt="分析一份 CSV 数据，给出关键趋势与异常值">数据分析</button>
+        <button type="button" class="welcome-example" data-welcome-prompt="把需求拆分给研究、分析和写作 Agent 并协调结果">多 Agent 编排</button>
+      </div>
+    </div>`;
+}
+
 function addMessage(role, content, meta) {
+  if (role === "user") $("#messages .welcome")?.remove();
   const div = document.createElement("div");
   div.className = "msg " + role;
   if (meta) {
@@ -1838,24 +2427,11 @@ function addMessage(role, content, meta) {
   if (role === "assistant") {
     contentEl.className = "md-body";
     contentEl.innerHTML = renderMarkdown(content);
-    // 复制按钮（assistant 消息）
-    const actions = document.createElement("div");
-    actions.className = "msg-actions";
-    const copyBtn = document.createElement("button");
-    copyBtn.className = "copy-btn";
-    copyBtn.textContent = "复制";
-    copyBtn.addEventListener("click", () => {
-      navigator.clipboard.writeText(String(content || "")).then(() => {
-        copyBtn.textContent = "已复制 ✓";
-        setTimeout(() => (copyBtn.textContent = "复制"), 1500);
-      });
-    });
-    actions.appendChild(copyBtn);
-    div.appendChild(actions);
   } else {
     contentEl.textContent = content;
   }
   div.appendChild(contentEl);
+  if (role === "assistant") ensureCopyButton(div);
   $("#messages").appendChild(div);
   scrollToBottom();
   return div;
@@ -2516,7 +3092,7 @@ function addWorkflowPanel(data, opts) {
   // Body
   const body = document.createElement("div");
   body.className = "workflow-body";
-  body.innerHTML = renderWorkflowBody(data);
+  body.innerHTML = renderWorkflowSummary(data);
   header.addEventListener("click", () => {
     panel.classList.toggle("open");
     header.querySelector(".wf-toggle").textContent = panel.classList.contains("open") ? "收起 ▴" : "展开 ▾";
@@ -2526,10 +3102,29 @@ function addWorkflowPanel(data, opts) {
   $("#messages").appendChild(panel);
   panel.classList.add("open");
   scrollToBottom();
-  // 绑定树节点折叠 + 工具卡片展开
-  bindTreeToggles(panel);
-  bindToolStepToggles(panel);
+  body.querySelector("[data-workflow-inspector]")?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setInspectorSection("execution");
+    setInspectorTab(event.currentTarget.dataset.inspectorTab || "timeline");
+    setInspectorCollapsed(false, true);
+  });
   return panel;
+}
+
+function renderWorkflowSummary(data) {
+  const toolCount = Array.isArray(data.tool_calls) ? data.tool_calls.length : 0;
+  const planCount = Array.isArray(data.plan) ? data.plan.length : 0;
+  const hasTrace = Boolean(data.trace_id || data.trace);
+  const details = [];
+  if (toolCount) details.push(`${toolCount} 次工具调用`);
+  if (planCount) details.push(`${planCount} 个计划步骤`);
+  if (!details.length) details.push("运行事件已记录");
+  const inspectorTab = hasTrace ? "trace" : "timeline";
+  return `
+    <div class="workflow-summary">
+      <p>${esc(details.join(" · "))}。完整事件与调用详情保留在右侧 Inspector。</p>
+      <button type="button" class="workflow-inspector-link" data-workflow-inspector data-inspector-tab="${inspectorTab}">在 Inspector 查看${hasTrace ? " Trace" : "时间线"} →</button>
+    </div>`;
 }
 
 function bindToolStepToggles(panel) {
@@ -2628,6 +3223,14 @@ function formatMs(ms) {
   if (ms == null) return "";
   if (ms >= 1000) return (ms / 1000).toFixed(1) + "s";
   return Math.round(ms) + "ms";
+}
+
+function formatFileSize(size) {
+  const bytes = Number(size);
+  if (!Number.isFinite(bytes) || bytes < 0) return "大小未知";
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
 }
 
 function renderTraceNodeV2(span, depth, totalDur) {
@@ -2796,7 +3399,7 @@ async function send() {
 
   const assistantEl = addMessage("assistant", "");
   assistantEl.classList.add("streaming");
-  const contentEl = assistantEl.querySelector("div:last-child");
+  const contentEl = assistantEl.querySelector(".md-body");
   contentEl.className = "md-body";
   contentEl.textContent = "";
 
@@ -2850,7 +3453,7 @@ async function send() {
     }
     if (finalAnswer) {
       contentEl.innerHTML = renderMarkdown(finalAnswer);
-      ensureCopyButton(assistantEl, finalAnswer);
+      ensureCopyButton(assistantEl);
     }
     assistantEl.classList.remove("streaming");
     if (finalData) {
@@ -2904,17 +3507,27 @@ async function send() {
   }
 }
 
-function ensureCopyButton(assistantEl, content) {
+function ensureCopyButton(assistantEl) {
   if (assistantEl.querySelector(".copy-btn")) return;
+  const contentEl = assistantEl.querySelector(".md-body");
+  if (!contentEl) return;
   const actions = document.createElement("div");
   actions.className = "msg-actions";
   const copyBtn = document.createElement("button");
   copyBtn.className = "copy-btn";
   copyBtn.textContent = "复制";
   copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(content).then(() => {
+    if (!navigator.clipboard?.writeText) {
+      copyBtn.textContent = "复制失败";
+      setTimeout(() => (copyBtn.textContent = "复制"), 1800);
+      return;
+    }
+    navigator.clipboard.writeText(String(contentEl.textContent || "")).then(() => {
       copyBtn.textContent = "已复制 ✓";
       setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+    }).catch(() => {
+      copyBtn.textContent = "复制失败";
+      setTimeout(() => (copyBtn.textContent = "复制"), 1800);
     });
   });
   actions.appendChild(copyBtn);
@@ -2998,6 +3611,7 @@ function handleFrame(frame, contentEl, onComplete) {
       break;
     case "done":
       setLivePlan(data.plan, data.plan_version, data.plan_revisions);
+      setExecutionTrace(data.trace, data.trace_id);
       onComplete(data.answer || "", data);
       break;
     case "execution.completed":
@@ -3070,12 +3684,14 @@ async function stopStreaming() {
 function bindEvents() {
   const input = $("#input");
   const sendBtn = $("#send");
-  const newBtn = $("#new-session");
+  const newBtns = $$("#new-session, [data-new-session]");
   const stopBtn = $("#stop");
-  const uploadBtn = $("#upload-btn");
+  const uploadBtns = $$("[data-upload-trigger]");
   const fileInput = $("#file-input");
+  const resourceContent = $("#resource-content");
   const messages = $("#messages");
   const jumpLatest = $("#jump-latest");
+  const searchInput = $("#search-input");
 
   sendBtn.addEventListener("click", send);
   if (stopBtn) stopBtn.addEventListener("click", stopStreaming);
@@ -3088,12 +3704,46 @@ function bindEvents() {
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
   });
-  if (newBtn) newBtn.addEventListener("click", newSession);
+  newBtns.forEach((newBtn) => newBtn.addEventListener("click", newSession));
+  $$("[data-session-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.sessionFilter = button.dataset.sessionFilter || "recent";
+      $$("[data-session-filter]").forEach((filter) => {
+        const active = filter === button;
+        filter.classList.toggle("active", active);
+        filter.setAttribute("aria-selected", String(active));
+      });
+      renderSessionList();
+    });
+  });
+  $("#open-search")?.addEventListener("click", openLoadedSearch);
+  $("#close-search")?.addEventListener("click", () => closeLoadedSearch());
+  $("#search-backdrop")?.addEventListener("click", () => closeLoadedSearch());
+  if (searchInput) {
+    searchInput.addEventListener("input", renderLoadedSearchResults);
+    searchInput.addEventListener("keydown", (event) => {
+      if (event.isComposing) return;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        $("#search-results .search-result")?.focus();
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        $("#search-results .search-result")?.click();
+      }
+    });
+  }
   if (messages) {
     messages.addEventListener("scroll", () => {
       state.followLatest = isAtLatest(messages);
       updateLatestButton();
     }, { passive: true });
+    messages.addEventListener("click", (event) => {
+      const example = event.target.closest("[data-welcome-prompt]");
+      if (!example) return;
+      input.value = example.dataset.welcomePrompt || "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+    });
   }
   if (jumpLatest) jumpLatest.addEventListener("click", scrollToLatest);
 
@@ -3145,10 +3795,30 @@ function bindEvents() {
     });
   }
   $("#navigation-backdrop")?.addEventListener("click", () => setNavigationOpen(false, true));
+
+  $$('[data-primary-view]').forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.getAttribute("aria-disabled") === "true") return;
+      setPrimaryView(button.dataset.primaryView);
+    });
+  });
+  $$('[data-inspector-section]').forEach((button) => {
+    button.addEventListener("click", () => setInspectorSection(button.dataset.inspectorSection));
+  });
+  $$('[data-inspector-tab]').forEach((button) => {
+    button.addEventListener("click", () => setInspectorTab(button.dataset.inspectorTab));
+  });
   document.addEventListener("keydown", (event) => {
+    if (!event.isComposing && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      openLoadedSearch();
+      return;
+    }
     trapInspectorFocus(event);
     if (event.key !== "Escape") return;
-    if (document.body.classList.contains("navigation-open")) {
+    if (!$("#search-dialog")?.hidden) {
+      closeLoadedSearch();
+    } else if (document.body.classList.contains("navigation-open")) {
       setNavigationOpen(false, true);
     } else if (!isInspectorCollapsed()) {
       setInspectorCollapsed(true, true);
@@ -3167,18 +3837,27 @@ function bindEvents() {
   }
   setInspectorCollapsed(isCompactInspectorViewport());
   setNavigationOpen(false);
+  setPrimaryView(uiState.primaryView);
+  setInspectorSection(uiState.inspectorSection);
+  setInspectorTab(uiState.inspectorTab);
 
   // 上传文件
-  if (uploadBtn && fileInput) {
-    uploadBtn.addEventListener("click", () => fileInput.click());
+  if (uploadBtns.length && fileInput) {
+    uploadBtns.forEach((uploadBtn) => uploadBtn.addEventListener("click", () => fileInput.click()));
     fileInput.addEventListener("change", async () => {
       const file = fileInput.files[0];
       if (!file) return;
+      if (file.size > 1024 * 1024) {
+        addErrorMsg("上传失败：文件超过全局沙箱 1MiB 限制。");
+        fileInput.value = "";
+        return;
+      }
       const fd = new FormData();
       fd.append("file", file);
       try {
         const r = await fetch("/api/web/upload", { method: "POST", body: fd });
-        const data = await r.json();
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.detail || "HTTP " + String(r.status));
         addToolMsg({ tool: "upload", arguments: { file: file.name }, success: true, data: data.hint });
         loadFiles();
       } catch (e) {
@@ -3187,6 +3866,15 @@ function bindEvents() {
       fileInput.value = "";
     });
   }
+  if (resourceContent) {
+    resourceContent.addEventListener("click", (event) => {
+      if (event.target.closest('[data-resource-action="upload"]')) fileInput?.click();
+    });
+  }
+
+  $("[data-composer-tools]")?.addEventListener("click", () => {
+    setPrimaryView("tools");
+  });
 
   document.querySelectorAll(".mode-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -3219,10 +3907,12 @@ function bindEvents() {
 async function loadFiles() {
   try {
     const data = await fetch("/api/web/files").then((r) => r.json());
+    state.resources.files = Array.isArray(data.files) ? data.files : [];
     renderList("#file-list", (data.files || []).map((f) => ({
       text: `${f.name} (${(f.size / 1024).toFixed(1)}KB)`,
       title: f.name,
     })));
+    renderResourceWorkspace();
   } catch (e) { /* 忽略 */ }
 }
 

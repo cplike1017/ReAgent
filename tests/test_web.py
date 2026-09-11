@@ -141,6 +141,234 @@ def test_web_index(tmp_path):
         assert '.session-item[aria-disabled="true"]' in style
 
 
+def test_web_uses_mist_mint_semantic_theme_tokens(tmp_path):
+    """The refactor exposes one accessible light/dark token system, not a blue reskin."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    for token in (
+        "--bg-canvas: #f7faf9",
+        "--bg-surface: #ffffff",
+        "--text-primary: #17211e",
+        "--accent: #19a974",
+        "--action-bg: #0f766e",
+        "--running-text: #0e7490",
+    ):
+        assert token in style
+    assert 'body[data-theme="dark"]' in style
+    assert "--bg-canvas: #111714" in style
+    assert "linear-gradient(135deg, #5575ff, #405ce2)" not in style
+
+
+def test_web_exposes_developer_studio_shell_contract(tmp_path):
+    """The navigation shell uses one header, rail, contextual sidebar, and tabbed Inspector."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+        style = client.get("/style.css").text
+
+    for fragment in (
+        'id="global-header"',
+        'id="app-rail"',
+        'data-primary-view="chat"',
+        'data-primary-view="agents"',
+        'data-primary-view="tools"',
+        'data-inspector-section="execution"',
+        'data-inspector-tab="timeline"',
+        'data-inspector-tab="trace"',
+        'data-inspector-tab="agents"',
+        'data-inspector-tab="context"',
+    ):
+        assert fragment in page
+    for symbol in ("const uiState", "setPrimaryView", "setInspectorSection", "setInspectorTab"):
+        assert symbol in script
+    assert ".global-header" in style
+    assert ".app-rail" in style
+
+
+def test_web_mobile_shell_clips_offcanvas_inspector_overflow(tmp_path):
+    """The transformed mobile Inspector must not create a horizontal document scrollbar."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    mobile_rules = style.split("@media (max-width: 680px)", 1)[1]
+    assert "overflow-x: hidden" in mobile_rules
+    assert "overflow-y: auto" in mobile_rules
+
+
+def test_web_mobile_shell_keeps_the_composer_inside_the_viewport(tmp_path):
+    """Mobile chat delegates scrolling to the message area instead of expanding the page."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    mobile_rules = style.split("@media (max-width: 680px)", 1)[1]
+    assert ".main { min-height: 0; height: 100%; }" in mobile_rules
+    assert ".workspace { min-height: 0; }" in mobile_rules
+    assert ".chat-column { min-height: 0;" in mobile_rules
+
+
+def test_web_chat_uses_stable_message_body_copy_and_shared_welcome(tmp_path):
+    """Streaming updates must target `.md-body`; copy and New Task use current/shared content."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    assert 'const contentEl = assistantEl.querySelector(".md-body");' in script
+    assert "function renderWelcome()" in script
+    assert '$("#messages").innerHTML = renderWelcome();' in script
+    assert '$("#messages .welcome")?.remove();' in script
+    new_session_body = script.split("function newSession()", 1)[1].split("/* ================= 消息渲染", 1)[0]
+    assert 'setPrimaryView("chat");' in new_session_body
+    assert "if (!navigator.clipboard?.writeText)" in script
+    assert 'navigator.clipboard.writeText(String(contentEl.textContent || ""))' in script
+
+
+def test_web_composer_exposes_real_upload_and_tools_shortcuts(tmp_path):
+    """Composer shortcuts reuse existing capabilities instead of suggesting unsupported controls."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    assert 'data-composer-upload' in page
+    assert 'data-composer-tools' in page
+    assert 'class="composer-runtime"' in page
+    assert '$$("[data-upload-trigger]")' in script
+    assert 'setPrimaryView("tools")' in script
+
+
+def test_web_completed_workflow_is_a_summary_with_an_inspector_link(tmp_path):
+    """Chat keeps one tool-card history; deep trace inspection belongs in Inspector."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    assert "function renderWorkflowSummary(data)" in script
+    assert 'data-workflow-inspector' in script
+    add_workflow_body = script.split("function addWorkflowPanel", 1)[1].split("function bindToolStepToggles", 1)[0]
+    assert "renderWorkflowSummary(data)" in add_workflow_body
+    assert "renderWorkflowBody(data)" not in add_workflow_body
+
+
+def test_web_inspector_renders_live_or_replayed_trace_facts(tmp_path):
+    """Trace tab consumes the current run tree or its existing trace endpoint, never placeholder data."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    assert 'id="execution-trace"' in page
+    assert 'id="execution-trace-meta"' in page
+    assert "function setExecutionTrace(trace, traceId)" in script
+    assert "function renderExecutionTrace()" in script
+    assert "fetchExecutionTrace(traceId" in script
+    assert "setExecutionTrace(data.trace, data.trace_id)" in script
+
+
+def test_web_inspector_hides_empty_copy_when_context_or_agents_have_facts(tmp_path):
+    """Data-bearing Inspector tabs must not also claim that no execution facts exist."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    assert '$("#context-empty-state").hidden = entries.length > 0;' in script
+    assert '$("#agents-empty-state").hidden = runs.length > 0;' in script
+
+
+def test_web_agents_inspector_renders_only_real_dependency_edges(tmp_path):
+    """Agent dependencies come from orchestration events rather than inferred step order."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    assert "function renderOrchestrationDependencyGraph(agents)" in script
+    assert 'className = "agent-dependency-graph"' in script
+    assert "agent.dependsOn.forEach" in script
+    assert "body.appendChild(renderOrchestrationDependencyGraph(orderedAgents))" in script
+
+
+def test_web_replay_invalidates_and_clears_the_previous_trace(tmp_path):
+    """A history replay cannot leave the previous run's tree visible while its trace loads."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    replay_body = script.split("function replayExecution(record, events)", 1)[1].split("function replayExecutionEvent", 1)[0]
+    assert "advanceExecutionViewVersion();" in replay_body
+    assert "clearExecutionTrace();" in replay_body
+
+
+def test_web_resource_workspace_reuses_runtime_resource_endpoints(tmp_path):
+    """Primary resource views render the data already exposed by the Web runtime APIs."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    assert 'id="resource-summary"' in page
+    assert 'id="resource-content"' in page
+    assert "function renderResourceWorkspace()" in script
+    assert "state.resources.tools" in script
+    assert "state.resources.files" in script
+    assert "renderResourceWorkspace();" in script.split("function setPrimaryView", 1)[1].split("function setInspectorSection", 1)[0]
+
+
+def test_web_search_is_local_to_loaded_entities_and_keyboard_accessible(tmp_path):
+    """The command search filters in-memory resources without widening the API contract."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        script = client.get("/app.js").text
+
+    assert 'id="search-dialog"' in page
+    assert 'id="search-input"' in page
+    assert 'id="search-results"' in page
+    assert "function openLoadedSearch()" in script
+    assert "function renderLoadedSearchResults()" in script
+    assert "function collectLoadedSearchEntities()" in script
+    search_body = script.split("function collectLoadedSearchEntities()", 1)[1].split("function setInspectorSection", 1)[0]
+    assert "fetch(" not in search_body
+    assert 'event.key.toLowerCase() === "k"' in script
+
+
+def test_web_session_navigation_supports_local_aliases_pins_and_filters(tmp_path):
+    """Session organization remains browser-local because the API has no metadata write contract."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    assert 'const SESSION_METADATA_STORAGE_KEY = "reagent-session-metadata-v1"' in script
+    assert "function loadSessionMetadata()" in script
+    assert "function renderSessionList()" in script
+    assert "function updateSessionMetadata(sessionId, patch)" in script
+    assert '$$("[data-session-filter]")' in script
+    assert "data-session-pin" in script
+    assert "data-session-alias" in script
+
+
+def test_web_upload_does_not_report_http_errors_as_success(tmp_path):
+    """The global sandbox upload keeps its own failure state and honors the documented size limit."""
+    with TestClient(_make_app(tmp_path)) as client:
+        script = client.get("/app.js").text
+
+    upload_body = script.split('fileInput.addEventListener("change", async () => {', 1)[1].split('$("[data-composer-tools]")', 1)[0]
+    assert "file.size > 1024 * 1024" in upload_body
+    assert "if (!r.ok) throw new Error" in upload_body
+    assert "addToolMsg({ tool: \"upload\", arguments: { file: file.name }, success: true" in upload_body
+
+
+def test_web_static_bundle_versions_and_accessibility_foundations_are_current(tmp_path):
+    """The delivered static files invalidate together and retain focus/reduced-motion support."""
+    with TestClient(_make_app(tmp_path)) as client:
+        page = client.get("/").text
+        style = client.get("/style.css").text
+
+    assert 'href="/style.css?v=26"' in page
+    assert 'src="/app.js?v=26"' in page
+    assert "button:focus-visible" in style
+    assert "@media (prefers-reduced-motion: reduce)" in style
+
+
+def test_web_mobile_inspector_uses_fixed_position_to_avoid_document_overflow(tmp_path):
+    """An off-canvas Inspector must not enlarge the mobile document's scroll width."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    compact_rules = style.split("@media (max-width: 920px)", 1)[1].split("@media (max-width: 680px)", 1)[0]
+    inspector_rules = compact_rules.split(".execution-panel", 1)[1].split("}", 1)[0]
+    assert "position: fixed" in inspector_rules
+
+
 def test_web_capabilities(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         tools = client.get("/api/web/tools").json()

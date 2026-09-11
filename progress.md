@@ -1,5 +1,25 @@
 # Progress Log
 
+## Mist Mint implementation — 2026-09-11
+
+- **Status:** in_progress
+- Created isolated `codex/mist-mint-developer-studio` worktree from `39cc4dc`.
+- Created this worktree's `.venv` and installed `requirements.txt`.
+- Next: run complete baseline pytest suite and record results before writing production code.
+- First complete-suite attempt failed at collection because `mcp` was not importable. No source changed. Diagnostics subsequently confirmed `mcp 1.30.0` is installed and importable from the same worktree interpreter; verify the environment-readiness hypothesis with the focused MCP test before rerunning the full suite.
+- Focused hypothesis check: `tests/test_mcp.py` passed (9 passed, 3.60s). Full baseline then passed: 282 passed, 1 third-party AnyIO deprecation warning, 137.91s. M0 is complete; entering M1 with a test-first CSS token contract.
+- M1 RED → GREEN: added `test_web_uses_mist_mint_semantic_theme_tokens`, observed it fail on absent `--bg-canvas`, then added the approved Mist Mint semantic light/dark tokens, compatibility aliases, dark-safe action color, and removed legacy blue gradients from primary navigation, CTA, and user messages. Focused contract passes; JS syntax and diff whitespace checks pass.
+- M2 RED → GREEN: added `test_web_exposes_developer_studio_shell_contract`, confirmed it failed while the global shell was absent, then implemented global header, primary rail, contextual sidebar, resource-workspace placeholder, and outer/inner Inspector tabs in `index.html`, `style.css`, and `app.js`. Existing runtime element IDs and Web API calls remain unchanged.
+- M2 focused frontend suite passed: 26 tests, plus `node --check app/static/app.js` and `git diff --check`.
+- Browser acceptance passed at 1536×1024: Chat/Tools rail state, inner Trace tab, and outer Files tab work; the only console message is the pre-existing missing favicon 404. At 390×844, visual inspection found horizontal overflow caused by the transformed closed Inspector, then a composer below the viewport after the first repair. Added two RED contracts and made narrow CSS fixes; both focused tests pass and the final mobile screenshots show no horizontal scrollbar, a visible composer, and a working Inspector drawer.
+- M3 RED → GREEN: added static regression contracts for stable streamed message targeting/current-answer copying, shared Welcome behavior, resource-aware New Task, real Composer shortcuts, and compact Workflow summaries. All began red and now pass with JavaScript syntax and diff checks.
+- M3 implementation: Welcome examples fill the input without sending; `send()` targets `.md-body`; the copy action reads current text and handles clipboard unavailability; Composer has real global-sandbox upload/Tools shortcuts plus read-only runtime label; a completed run keeps one real Tool card in Chat and reduces the Workflow to a summary linked to Inspector.
+- Browser checks: 390×844 shows usable Welcome examples and Composer; the welcome prompt fills input without a request; New Task from Tools returns to Chat. At 1536×1024, actual local Stub calculator runs verify Welcome removal, final-answer copy action, stable Tool card, compact Workflow summary, and Trace Inspector navigation. Entering M4.
+- M4 RED → GREEN: live and replayed Trace data render in Inspector through the existing response/endpoint; new runs and replays clear stale trees; Context and Agents empty-copy states disappear when real facts exist; dependency display lists only actual `depends_on` edges. Browser replay/current-run verification confirms a real calculator Trace and Context facts.
+- M5 RED → GREEN: resource workspace renders current Tools/Skills, MCP, Agent profile, Files, Trace-history, and local Settings data. Session grouping/filtering, local aliases/pins, and `Ctrl/Cmd+K` loaded-content search are local-only and do not expand API requests. Uploads now reject oversized files locally and surface HTTP errors instead of showing false success.
+- M6 static-contract pass: cache-busted CSS/JS references are both v26; existing visible-focus and reduced-motion rules remain present. Focused `tests/test_web.py tests/test_frontend_events.py` passes: 40 passed in 18.79s; `node --check` and `git diff --check` pass (only CRLF normalization warnings).
+- M6 mobile verification found and repaired one off-canvas Inspector regression: `position: absolute` at ≤920px enlarged a 390px document to 763px. The Inspector is now fixed-position; browser evaluation confirms `scrollWidth=390`, `clientWidth=390`, and Composer bottom `832 ≤ 844`. Final `pytest -q` passes: **299 passed, 5 third-party warnings, 132.13s**.
+
 ## Frontend implementation (2026-09-11)
 
 - Re-read the audit plan, current static front end, web API and orchestration runner before changing code. Root causes remain as documented: name-based tool-card matching, missing lifecycle state/identity, deferred workflow creation, unsafe Markdown insertion, flex shrinking, and unconditional orchestration arrows.
