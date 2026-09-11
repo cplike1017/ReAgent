@@ -1,5 +1,47 @@
 # Task Plan: Update, configure, and run ReAgent
 
+## Mist Mint × Developer Studio implementation (2026-09-11)
+
+## Goal
+
+Implement the approved Mist Mint × Developer Studio front-end refactor on `codex/mist-mint-developer-studio` without changing Web API or Agent Runtime contracts, and verify every visible behavior with regression coverage.
+
+## Current Phase
+
+Complete — implementation and final verification recorded.
+
+## Delivery phases
+
+- [x] M0: Isolated baseline, fixtures, and failing regression contracts.
+- [x] M1: Semantic Mist Mint tokens and accessible visual foundation.
+- [x] M2: Developer Studio shell, navigation, tabs, and responsive drawers.
+- [x] M3: Chat, tool cards, composer, and welcome states.
+- [x] M4: Evidence-backed execution inspector, trace, graph, context, and summaries.
+- [x] M5: Resource views, local session organization, and loaded-content search.
+- [x] M6: Dark theme, responsive/a11y completion, full verification, and documentation.
+
+## Constraints
+
+- Worktree: `D:\CodeSource\harness\agent-runtime\.worktrees\mist-mint-developer-studio`.
+- Branch: `codex/mist-mint-developer-studio`, based on `39cc4dc`.
+- Preserve the Web API, Agent Runtime, persistence models, and user data. Production changes stay in `app/static/` unless an explicitly approved scope expansion is required.
+- Follow RED → GREEN → refactor for every behavior change; keep a passing baseline before implementation.
+
+## M0 verification
+
+- Focused MCP verification: 9 passed after the initial dependency-install readiness race.
+- Complete baseline: 282 passed, 1 third-party AnyIO deprecation warning, 137.91s.
+- First implementation slice: semantic Mist Mint token contract (RED pending) before CSS edits.
+- M1 RED → GREEN completed with `test_web_uses_mist_mint_semantic_theme_tokens`; semantic light/dark tokens and contrast-safe CTA tokens now replace the legacy blue palette.
+- M2 RED → GREEN completed with `test_web_exposes_developer_studio_shell_contract`; the desktop shell has a global header, primary rail, contextual sidebar, resource workspace, and two-level Inspector tabs while preserving existing runtime IDs and APIs.
+- M2 browser verification passed at 1536×1024 and 390×844. A transformed mobile Inspector initially generated horizontal overflow and pushed the composer outside the viewport; both regressions now have focused contracts and are fixed with clipped horizontal overflow plus bounded mobile flex sizing.
+- M3 RED → GREEN completed: streamed assistant output now always targets `.md-body`; copy reads the current rendered message and gives a failure state; Welcome/New Task share one renderer and the first user message removes it; a New Task entered from a resource view returns to Chat.
+- M3 Composer now exposes only real shortcuts (global-sandbox upload and Tools view) plus a read-only runtime label. Completed runs use a compact Workflow summary that links to Inspector instead of duplicating the entire Trace and tools in Chat.
+- M3 browser verification passed with an actual local Stub calculator execution at 1536×1024. The message stack contains user prompt, final answer, one stable tool card, compact workflow summary, and Inspector Trace jump; New Task and 390×844 responsive composer behavior also passed.
+- M4 RED → GREEN: the Inspector now renders current/replayed Trace trees through the existing trace endpoint, clears stale Trace state on run changes, hides Context/Agents empty copy when facts exist, and renders dependency edges only when orchestration events declare them.
+- M5 RED → GREEN: resource workspaces reuse the loaded Tools, Skills, MCP, Agents, Files, and execution-history responses; files retain global-sandbox semantics and reject oversized/HTTP-failed uploads; session aliases and pins are browser-local; search is keyboard-accessible and filters only loaded entities.
+- M6 complete: static asset versions are v26, focus/reduced-motion support remains active, 390px Inspector is fixed-position so it cannot widen the document, browser checks pass, and the final full suite passes (`299 passed, 5 third-party warnings, 132.13s`).
+
 ## Goal
 Bring the local ReAgent checkout up to date with `origin/main`, apply the supplied environment configuration in the project-prescribed location, and start and verify the service.
 

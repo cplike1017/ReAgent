@@ -1,5 +1,22 @@
 # Findings & Decisions
 
+## Mist Mint implementation (2026-09-11)
+
+- User authorized implementation of the approved Mist Mint × Developer Studio plan.
+- Isolated worktree created from `39cc4dc` after the project-local `.worktrees/` ignore rule was committed on main.
+- M0 must rerun the complete regression suite before any application edit and add focused RED tests before each behavior change.
+- The design/implementation plan remains in the parent checkout at `D:\CodeSource\harness\agent-runtime\docs\reagent-mist-mint-developer-studio-execution-plan.md`; treat it as approved scope and source mapping.
+- Baseline attempt initially failed during test collection with `ModuleNotFoundError: mcp`. Investigation shows both root and worktree interpreters use their own `.venv`, both now expose `mcp 1.30.0`, and `pip show` locates the package in the worktree. The pip installation command was still completing around the first test attempt; this is an environment-readiness race, not an application or manifest defect. Hypothesis: rerunning the focused MCP test after installation completion will pass without a source change.
+- M2 keeps the established runtime DOM IDs and API routes intact while adding a global header (`#global-header`), primary rail (`#app-rail`), contextual views, and stateful Inspector section/detail tabs. The resource destinations intentionally remain explicit empty states until M5 wires their data interactions.
+- Browser evidence at 1536×1024 shows the intended three-column Developer Studio structure. Rail navigation, primary Tools view, Timeline/Trace detail switching, and outer Files switching all update state without console errors beyond the pre-existing favicon 404.
+- At 390×844, the off-canvas Inspector's `translateX(100%)` enlarged document scroll width to 748px. The smallest safe repair is horizontal clipping on the mobile document while retaining vertical scrolling; a second check found mobile min-heights expanding the page and hiding the composer, so the mobile flex shell now bounds `main`, `workspace`, and `chat-column` to the viewport.
+- M3 browser runs found and corrected a latent Welcome residue: the static empty-state remained above the first user/assistant pair because `send()` never removed it. `addMessage("user", ...)` now performs that one-time removal, while `newSession()` and initial load both use `renderWelcome()`.
+- The original assistant copy action captured the assistant's initially empty string, and `send()` selected `div:last-child`. The replacement uses a stable `.md-body` reference and reads that element's current text at click time; absence or failure of the clipboard API reports a recoverable failure label.
+- A completed calculator run previously copied a full Trace tree and a second copy of tool calls into Chat. Chat now keeps the one real tool card plus a compact run summary; the summary selects the existing Trace/Timeline Inspector tab instead of inventing another data path. The post-change desktop screenshot confirms the expected hierarchy.
+- M4 retains one Trace data path: a live `done` event supplies the tree directly and a history replay resolves the existing trace endpoint. Switching/replaying invalidates and clears the previous tree first, so a stale trace cannot remain visible while data loads.
+- Context and Agent tabs now distinguish actual zero-data states from populated states. Agent dependency rows are derived solely from `depends_on`; no sequential arrow is invented for independent Agent steps.
+- M5 resource pages store only already-returned API fields in front-end state. Search does not fetch more entities, messages, or server-side results. Session alias/pin metadata is best-effort localStorage data, intentionally scoped to this browser and safely ignored when JSON is unavailable or malformed.
+
 ## Frontend audit (2026-09-10)
 - Final report `docs/frontend-audit-plan.md` written on 2026-09-11: F01–F16, evidence classifications, priorities, theme tokens and contrast calculations, event/identity requirements, T0–T6 execution order, code-entry links, and acceptance matrix.
 - 1024×768 check: main width 744px, input width 628px, fixed sidebar remains 280px. 12 screenshots in total. No physical mobile keyboard or real-provider quality testing performed.
