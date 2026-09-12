@@ -13,6 +13,7 @@ Web UI 路由（Stage 12）。
 """
 import asyncio
 import json
+import sqlite3
 from typing import AsyncIterator, Literal
 from uuid import uuid4
 
@@ -1470,15 +1471,10 @@ async def web_sessions(request: Request) -> dict:
     runtime = _get_runtime(request)
     if runtime.session_repo is None:
         return {"sessions": []}
-    # 复用 SQLite 查询：列出会话（按 updated_at 排序）
     try:
-        conn = runtime.session_repo._conn
-        rows = conn.execute(
-            "SELECT session_id, created_at, updated_at FROM sessions ORDER BY updated_at DESC LIMIT 50"
-        ).fetchall()
-        sessions = [dict(r) for r in rows]
-    except Exception:
-        sessions = []
+        sessions = runtime.session_repo.list_sessions(limit=50)
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail="会话存储暂不可用，请稍后重试") from exc
     return {"sessions": sessions}
 
 

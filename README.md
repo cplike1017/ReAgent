@@ -255,6 +255,8 @@ python -m evals.runner --compare evals/runs/<baseline>.json
 - [阶段 1：ReAct Loop](docs/stage1.md)
 - [阶段 12：多 Agent 编排](docs/stage12.md)
 - [前端审查与实施计划](docs/frontend-audit-plan.md)
+- [UI 与底层改进记录](docs/ui-runtime-improvements-2026-09-12.md)
+- [MARL 科研助手演进规划（尚未实施）](docs/marl-research-assistant-roadmap.md)
 - [演示录制指南](docs/demo-guide.md)
 
 提交改动前请运行测试，并避免提交 `.env`、数据库、Trace、评测运行结果或其他运行时生成文件。当前仓库未声明许可证；在复用或分发前请先确认许可范围。

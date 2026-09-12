@@ -103,6 +103,30 @@ class SQLiteSessionRepository:
             ).fetchone()
         return SessionRecord(**dict(row)) if row is not None else None
 
+    def list_sessions(self, limit: int = 50) -> list[dict]:
+        """最新会话及持久化消息摘要；不加载完整历史、不调用模型。"""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT s.session_id, s.created_at, s.updated_at,
+                    (SELECT m.content FROM messages m
+                     WHERE m.session_id = s.session_id AND m.role = 'user'
+                     ORDER BY m.seq ASC LIMIT 1) AS first_question,
+                    (SELECT m.content FROM messages m
+                     WHERE m.session_id = s.session_id AND m.role = 'assistant'
+                     ORDER BY m.seq DESC LIMIT 1) AS last_answer
+                FROM sessions s ORDER BY s.updated_at DESC, s.session_id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        sessions = []
+        for row in rows:
+            item = dict(row)
+            item["title"] = _message_summary(item.pop("first_question"), 48) or "新会话"
+            item["preview"] = _message_summary(item.pop("last_answer"), 72) or "尚无 Assistant 回复"
+            sessions.append(item)
+        return sessions
+
     def update_status(self, session_id: str, status: SessionStatus | str) -> None:
         value = status.value if isinstance(status, SessionStatus) else status
         with self._lock:
@@ -172,3 +196,22 @@ class SQLiteSessionRepository:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+def _message_summary(raw: str | None, limit: int) -> str:
+    """只摘取文本，避免把工具调用或图片数据 URL 当作会话标题。"""
+    try:
+        message = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return ""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        content = " ".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        )
+    if not isinstance(content, str):
+        return ""
+    text = " ".join(content.split())
+    return text[:limit] + ("…" if len(text) > limit else "")

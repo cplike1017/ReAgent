@@ -353,8 +353,8 @@ def test_web_static_bundle_versions_and_accessibility_foundations_are_current(tm
         page = client.get("/").text
         style = client.get("/style.css").text
 
-    assert 'href="/style.css?v=29"' in page
-    assert 'src="/app.js?v=29"' in page
+    assert 'href="/style.css?v=31"' in page
+    assert 'src="/app.js?v=31"' in page
     assert "button:focus-visible" in style
     assert "@media (prefers-reduced-motion: reduce)" in style
 

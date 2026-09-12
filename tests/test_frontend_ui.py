@@ -93,7 +93,8 @@ def test_new_task_resets_all_execution_presentation(tmp_path):
     with TestClient(_make_app(tmp_path)) as client:
         script = client.get("/app.js").text
 
-    body = script.split("function newSession()", 1)[1].split("/* ================= 消息渲染", 1)[0]
+    body = script.split("function resetExecutionPresentation()", 1)[1].split("/* ================= 消息渲染", 1)[0]
+    assert "resetExecutionPresentation();" in body.split("function newSession()", 1)[1]
     assert "window.clearInterval(state.executionTimer)" in body
     assert 'title.textContent = "开始一个新任务"' in body
     assert 'updateExecutionStatus("idle", "准备就绪"' in body

@@ -35,7 +35,7 @@ def _resolve_sandbox_path(relative_path: str) -> Path:
     settings = Settings()
     sandbox = Path(settings.sandbox_dir).resolve()
     target = (sandbox / relative_path).resolve()
-    if not str(target).startswith(str(sandbox)):
+    if not target.is_relative_to(sandbox):
         raise ToolExecutionError(f"路径越界：只允许沙箱目录内（{sandbox}）")
     if not target.exists():
         raise ToolExecutionError(f"文件不存在: {relative_path}")

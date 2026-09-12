@@ -88,7 +88,7 @@ def _resolve_in_sandbox(relative_path: str) -> Path:
     sandbox = Path(settings.sandbox_dir).resolve()
     sandbox.mkdir(parents=True, exist_ok=True)
     target = (sandbox / relative_path).resolve()
-    if not str(target).startswith(str(sandbox)):
+    if not target.is_relative_to(sandbox):
         raise ToolExecutionError(f"路径越界：只允许在沙箱目录内操作（{sandbox}）")
     return target
 

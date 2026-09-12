@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ReAgent · Agent 工作台</title>
-<link rel="stylesheet" href="/style.css?v=29">
+<link rel="stylesheet" href="/style.css?v=31">
 </head>
-<body data-theme="light">
+<body data-theme="light" data-color-theme="mint">
 <svg class="icon-sprite" aria-hidden="true" focusable="false">
   <defs>
     <symbol id="icon-brand" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="5.5"></circle><path d="M7.2 5.2 12 3l4.8 2.2L21 9v6l-4.2 3.8L12 21l-4.8-2.2L3 15V9z"></path></symbol>
@@ -41,6 +41,11 @@
     </div>
     <button id="open-search" class="global-search" type="button" title="搜索已加载内容" aria-label="搜索已加载内容"><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg><span>搜索会话、工具、Agent…</span><kbd>⌘ K</kbd></button>
     <div class="global-actions">
+      <button id="toggle-sidebar" class="icon-btn desktop-pane-toggle" type="button" aria-label="收起左侧栏" title="收起左侧栏" aria-controls="primary-navigation" aria-expanded="true"><svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg></button>
+      <button id="toggle-right-pane" class="icon-btn desktop-pane-toggle" type="button" aria-label="收起右侧栏" title="收起右侧栏" aria-controls="execution-panel" aria-expanded="true"><svg class="ui-icon" aria-hidden="true"><use href="#icon-panel"></use></svg></button>
+      <select id="color-theme-select" class="color-theme-select" data-color-theme-select aria-label="界面配色" title="切换配色，深浅模式独立保留">
+        <option value="mint">薄荷晨光</option><option value="ocean">海盐蓝</option><option value="peach">蜜桃日光</option><option value="iris">鸢尾紫</option>
+      </select>
       <div class="connection-status global-connection" aria-live="polite"><span id="conn-status" class="status-dot"></span><span id="conn-text">正在检查连接…</span></div>
       <button id="new-session" class="global-new-session" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg> New Task</button>
       <button id="theme-toggle" class="icon-btn" type="button" title="切换主题" aria-label="切换深浅主题"><svg class="ui-icon" aria-hidden="true"><use href="#icon-sun"></use></svg></button>
@@ -83,15 +88,15 @@
   <div class="app-shell">
     <nav class="app-rail" id="app-rail" aria-label="主要导航">
       <div class="rail-nav">
-        <button class="rail-item active" type="button" data-primary-view="chat" aria-current="page"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chat"></use></svg><span>Chat</span></button>
-        <button class="rail-item" type="button" data-primary-view="agents"><svg class="ui-icon" aria-hidden="true"><use href="#icon-agents"></use></svg><span>Agents</span></button>
-        <button class="rail-item" type="button" data-primary-view="tools"><svg class="ui-icon" aria-hidden="true"><use href="#icon-tool"></use></svg><span>Tools</span></button>
-        <button class="rail-item" type="button" data-primary-view="mcp"><svg class="ui-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span>MCP</span></button>
-        <button class="rail-item" type="button" data-primary-view="traces"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trace"></use></svg><span>Traces</span></button>
-        <button class="rail-item" type="button" data-primary-view="evals" aria-disabled="true" title="评测工作台尚未接入 Web"><svg class="ui-icon" aria-hidden="true"><use href="#icon-check-square"></use></svg><span>Evals</span></button>
-        <button class="rail-item" type="button" data-primary-view="files"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg><span>Files</span></button>
+        <button class="rail-item active" type="button" data-primary-view="chat" aria-label="Chat 会话" aria-current="page"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chat"></use></svg><span>Chat</span></button>
+        <button class="rail-item" type="button" data-primary-view="agents" aria-label="Agents 档案"><svg class="ui-icon" aria-hidden="true"><use href="#icon-agents"></use></svg><span>Agents</span></button>
+        <button class="rail-item" type="button" data-primary-view="tools" aria-label="Tools 工具"><svg class="ui-icon" aria-hidden="true"><use href="#icon-tool"></use></svg><span>Tools</span></button>
+        <button class="rail-item" type="button" data-primary-view="mcp" aria-label="MCP 服务"><svg class="ui-icon" aria-hidden="true"><use href="#icon-network"></use></svg><span>MCP</span></button>
+        <button class="rail-item" type="button" data-primary-view="traces" aria-label="Traces 记录"><svg class="ui-icon" aria-hidden="true"><use href="#icon-trace"></use></svg><span>Traces</span></button>
+        <button class="rail-item" type="button" data-primary-view="evals" aria-label="Evals 评测（尚未开放）" aria-disabled="true" title="评测工作台尚未接入 Web"><svg class="ui-icon" aria-hidden="true"><use href="#icon-check-square"></use></svg><span>Evals</span></button>
+        <button class="rail-item" type="button" data-primary-view="files" aria-label="Files 文件"><svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg><span>Files</span></button>
       </div>
-      <div class="rail-bottom"><button class="rail-item" type="button" data-primary-view="settings"><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span>Settings</span></button></div>
+      <div class="rail-bottom"><button class="rail-item" type="button" data-primary-view="settings" aria-label="Settings 设置"><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span>Settings</span></button></div>
     </nav>
     <aside class="sidebar context-sidebar" id="primary-navigation" aria-label="上下文导航">
       <div class="context-sidebar-header">
@@ -108,10 +113,11 @@
       <p id="session-feedback" class="local-feedback" role="status" aria-live="polite" hidden></p>
       <div class="section-heading">
         <h2 id="sessions-heading">最近会话</h2>
+        <button id="refresh-sessions" class="mini-btn" type="button" aria-label="刷新会话列表" title="刷新会话列表">刷新</button>
         <span class="count" id="session-count" aria-label="会话数量">0</span>
       </div>
       <ul class="cap-list session-list" id="session-list" aria-label="会话列表"></ul>
-      <p class="session-scope">最多显示最近 50 个会话；消息标题与预览只缓存在当前页面。</p>
+      <p class="session-scope">最近 50 个会话；主题取自首条问题，预览来自最近回复。别名与置顶仅保存在此浏览器。</p>
     </section>
 
     <div class="sidebar-scroll">
@@ -153,7 +159,7 @@
       </details>
     </div>
   </aside>
-  <div id="sidebar-resizer" class="pane-resizer sidebar-resizer" role="separator" aria-label="调整会话栏宽度" aria-orientation="vertical" aria-controls="primary-navigation" aria-valuemin="200" aria-valuemax="340" aria-valuenow="252" tabindex="0"></div>
+  <div id="sidebar-resizer" class="pane-resizer sidebar-resizer" role="separator" aria-label="调整会话栏宽度" title="拖动调整宽度，方向键微调，双击恢复默认" aria-orientation="vertical" aria-controls="primary-navigation" aria-valuemin="200" aria-valuemax="480" aria-valuenow="252" tabindex="0"></div>
   <button id="navigation-backdrop" class="drawer-backdrop navigation-backdrop" type="button" aria-label="关闭会话导航" aria-hidden="true" tabindex="-1"></button>
 
   <main class="main">
@@ -392,6 +398,12 @@
           <div class="inspector-section inspector-heading"><h3>Settings</h3></div>
           <p class="inspector-support-copy">管理浏览器偏好和服务端运行配置。密钥只写不回显；运行配置保存后需重启 API 与 Worker。</p>
           <div class="local-settings">
+            <div class="theme-picker" role="group" aria-label="配色方案">
+              <button type="button" data-color-theme-option="mint" aria-pressed="true"><span class="theme-swatch" aria-hidden="true"></span><strong>薄荷晨光</strong><small>轻盈 · 清新</small></button>
+              <button type="button" data-color-theme-option="ocean" aria-pressed="false"><span class="theme-swatch" aria-hidden="true"></span><strong>海盐蓝</strong><small>通透 · 明快</small></button>
+              <button type="button" data-color-theme-option="peach" aria-pressed="false"><span class="theme-swatch" aria-hidden="true"></span><strong>蜜桃日光</strong><small>温暖 · 活力</small></button>
+              <button type="button" data-color-theme-option="iris" aria-pressed="false"><span class="theme-swatch" aria-hidden="true"></span><strong>鸢尾紫</strong><small>灵感 · 柔和</small></button>
+            </div>
             <button id="settings-theme-toggle" class="settings-row" type="button"><span>界面主题</span><strong>切换深浅主题</strong></button>
             <label class="settings-row" for="settings-default-tab"><span>默认 Inspector Tab</span><select id="settings-default-tab"><option value="timeline">Timeline</option><option value="trace">Trace</option><option value="agents">Agents</option><option value="context">Context</option></select></label>
             <button id="clear-local-preferences" class="settings-row danger" type="button"><span>本地偏好</span><strong>恢复默认</strong></button>
@@ -435,6 +447,6 @@
 </div>
 
 <script src="/marked.min.js"></script>
-<script src="/app.js?v=29"></script>
+<script src="/app.js?v=31"></script>
 </body>
 </html>

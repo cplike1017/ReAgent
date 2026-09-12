@@ -40,10 +40,14 @@ def arxiv_search_handler(query: str, max_results: int = 5, sort_by: str = "relev
     if not query.strip():
         raise ToolExecutionError("检索关键词不能为空")
     sort = "relevance" if sort_by == "relevance" else "submittedDate"
-    # 关键词用引号包裹提升相关性（arXiv 默认把空格当 OR）
-    quoted = f'"{query.strip()}"' if " " in query.strip() else query.strip()
+    # 显式字段/布尔表达式交给 arXiv 解释；普通关键词取交集，短语由用户加引号。
+    query_text = query.strip()
+    explicit_syntax = re.search(r'\b\w+:|\b(?:AND|OR|ANDNOT)\b|[()"]', query_text)
+    search_query = query_text if explicit_syntax else " AND ".join(
+        f"all:{word}" for word in query_text.split()
+    )
     params = {
-        "search_query": f"all:{quoted}",
+        "search_query": search_query,
         "start": 0,
         "max_results": max_results,
         "sortBy": sort,
@@ -63,6 +67,7 @@ def arxiv_search_handler(query: str, max_results: int = 5, sort_by: str = "relev
         lines.append(f"{i}. **{e['title']}**")
         lines.append(f"   作者: {e['authors']}")
         lines.append(f"   年份: {e['year']} | 链接: {e['link']}")
+        lines.append(f"   首次发表: {e['published']} | 最近更新: {e['updated']}")
         if e["abstract"]:
             lines.append(f"   摘要: {e['abstract'][:220]}")
         lines.append("")
@@ -73,21 +78,28 @@ def _parse_arxiv_atom(xml_text: str) -> list[dict]:
     """解析 arXiv Atom XML → 论文条目列表。"""
     try:
         root = ET.fromstring(xml_text)
-    except ET.ParseError:
-        return []
+    except ET.ParseError as exc:
+        raise ToolExecutionError("arXiv 返回了无法解析的 XML，不能判断是否有相关论文") from exc
+    if root.tag != f"{{{_NS['atom']}}}feed":
+        raise ToolExecutionError("arXiv 返回的内容不是 Atom feed")
     entries = []
     for entry in root.findall("atom:entry", _NS):
         title = _clean((entry.findtext("atom:title", "", _NS) or ""))
         link_el = entry.find("atom:id", _NS)
         link = (link_el.text or "").strip() if link_el is not None else ""
+        if "/api/errors" in link:
+            raise ToolExecutionError("arXiv API 返回查询错误，请检查检索表达式")
         authors = [a.findtext("atom:name", "", _NS).strip() for a in entry.findall("atom:author", _NS)]
         authors = [a for a in authors if a and a != ":"]
         published = entry.findtext("atom:published", "", _NS) or ""
+        updated = entry.findtext("atom:updated", "", _NS) or ""
         abstract = _clean((entry.findtext("atom:summary", "", _NS) or ""))
         entries.append({
             "title": title or "(无标题)",
             "authors": ", ".join(a for a in authors if a)[:120] or "未知",
             "year": published[:4],
+            "published": published,
+            "updated": updated,
             "link": link,
             "abstract": abstract,
         })

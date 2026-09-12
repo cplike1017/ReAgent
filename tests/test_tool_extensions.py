@@ -43,7 +43,8 @@ def test_arxiv_atom_parser():
 
 
 def test_arxiv_parser_bad_xml():
-    assert _parse_arxiv_atom("<not xml") == []
+    with pytest.raises(ToolExecutionError):
+        _parse_arxiv_atom("<not xml")
 
 
 def test_arxiv_search_empty_query():

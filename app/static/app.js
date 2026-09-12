@@ -1,8 +1,9 @@
-/* ReAgent Web UI 前端逻辑 v29 */
+/* ReAgent Web UI 前端逻辑 v31 */
 "use strict";
 
 const state = {
   sessionId: null,
+  pendingSessionId: null,
   agentMode: "react",
   streaming: false,
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
@@ -33,6 +34,7 @@ const state = {
   executionTrace: null,
   executionTraceId: null,
   sessions: [],
+  sessionListVersion: 0,
   sessionFilter: "recent",
   sessionMetadata: {},
   sessionContentCache: new Map(),
@@ -68,10 +70,13 @@ const PRIMARY_VIEW_COPY = Object.freeze({
 
 const SESSION_METADATA_STORAGE_KEY = "reagent-session-metadata-v1";
 const PANE_WIDTH_STORAGE_KEY = "reagent-pane-widths-v1";
+const PANE_VISIBILITY_STORAGE_KEY = "reagent-pane-visibility-v1";
 const DEFAULT_INSPECTOR_TAB_STORAGE_KEY = "reagent-default-inspector-tab";
+const COLOR_THEME_STORAGE_KEY = "reagent-color-theme-v1";
+const COLOR_THEMES = new Set(["mint", "ocean", "peach", "iris"]);
 const PANE_WIDTH_CONFIG = Object.freeze({
-  sidebar: { property: "--sidebar-width", element: "#primary-navigation", resizer: "#sidebar-resizer", min: 200, max: 340 },
-  inspector: { property: "--inspector-width", element: "#execution-panel", resizer: "#inspector-resizer", min: 320, max: 560 },
+  sidebar: { property: "--sidebar-width", element: "#primary-navigation", resizer: "#sidebar-resizer", min: 200, max: 480 },
+  inspector: { property: "--inspector-width", element: "#execution-panel", resizer: "#inspector-resizer", min: 320, max: 720 },
 });
 
 const TIMELINE_FILTERS = new Set(["all", "active", "success", "attention"]);
@@ -582,6 +587,10 @@ async function loadRuntimeSettings() {
 
 async function saveRuntimeSettings(event) {
   event?.preventDefault();
+  if (!state.runtimeSettings?.settings) {
+    setLocalFeedback("#settings-feedback", "error", "运行配置尚未成功读取，请刷新页面后重试；未提交任何修改。");
+    return;
+  }
   const button = $("#settings-save-runtime");
   const payload = {
     llm_provider: $("#settings-llm-provider").value,
@@ -622,6 +631,30 @@ async function saveRuntimeSettings(event) {
   }
 }
 
+function setColorTheme(theme, persist = true) {
+  const selected = COLOR_THEMES.has(theme) ? theme : "mint";
+  document.body.dataset.colorTheme = selected;
+  $$("[data-color-theme-select]").forEach((select) => { select.value = selected; });
+  $$("[data-color-theme-option]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.colorThemeOption === selected));
+  });
+  if (persist) {
+    try { localStorage.setItem(COLOR_THEME_STORAGE_KEY, selected); } catch (error) { /* 页面内仍可切换 */ }
+  }
+}
+
+function bindColorThemes() {
+  let saved = "mint";
+  try { saved = localStorage.getItem(COLOR_THEME_STORAGE_KEY) || "mint"; } catch (error) { /* 使用默认配色 */ }
+  setColorTheme(saved, false);
+  $$("[data-color-theme-select]").forEach((select) => {
+    select.addEventListener("change", () => setColorTheme(select.value));
+  });
+  $$("[data-color-theme-option]").forEach((button) => {
+    button.addEventListener("click", () => setColorTheme(button.dataset.colorThemeOption));
+  });
+}
+
 function bindLocalSettings() {
   const defaultTab = $("#settings-default-tab");
   let savedDefault = "timeline";
@@ -641,15 +674,19 @@ function bindLocalSettings() {
   $("#runtime-settings-form")?.addEventListener("submit", saveRuntimeSettings);
   $("#clear-local-preferences")?.addEventListener("click", () => {
     try {
-      ["reagent-theme", "reagent-timeline-filter", PANE_WIDTH_STORAGE_KEY, DEFAULT_INSPECTOR_TAB_STORAGE_KEY, SESSION_METADATA_STORAGE_KEY]
+      ["reagent-theme", "reagent-timeline-filter", PANE_WIDTH_STORAGE_KEY, DEFAULT_INSPECTOR_TAB_STORAGE_KEY, SESSION_METADATA_STORAGE_KEY, COLOR_THEME_STORAGE_KEY, PANE_VISIBILITY_STORAGE_KEY]
         .forEach((key) => localStorage.removeItem(key));
     } catch (error) { /* 忽略 */ }
     document.body.dataset.theme = "light";
+    setColorTheme("mint", false);
     const theme = $("#theme-toggle");
     if (theme) theme.textContent = "◐";
     setTimelineFilter("all");
     resetPaneWidth("sidebar");
     resetPaneWidth("inspector");
+    uiState.desktopInspectorCollapsed = false;
+    setSidebarCollapsed(false);
+    setInspectorCollapsed(isCompactInspectorViewport());
     state.sessionMetadata = {};
     renderSessionList();
     if (defaultTab) defaultTab.value = "timeline";
@@ -691,10 +728,10 @@ function syncSessionNavigationState() {
 async function init() {
   renderWelcome();
   state.sessionMetadata = loadSessionMetadata();
+  bindEvents();
   const [capabilitiesReady] = await Promise.all([loadCapabilities(), loadSessions(), loadAgents(), loadRuntimeSettings()]);
   // 连接状态必须来自真实 API 响应，不能在失败后被无条件覆盖为“已连接”。
   setConnStatus(capabilitiesReady === true);
-  bindEvents();
 }
 
 function setConnStatus(online) {
@@ -2637,12 +2674,12 @@ function sessionMetadataFor(sessionId) {
 function sessionTitle(session) {
   const alias = sessionMetadataFor(session.session_id).alias;
   const cached = state.sessionContentCache.get(session.session_id);
-  return alias || (cached && cached.title) || session.session_id.slice(-16);
+  return alias || session.title || (cached && cached.title) || "新会话";
 }
 
 function sessionPreview(session) {
   const cached = state.sessionContentCache.get(session.session_id);
-  return cached && cached.preview ? cached.preview : "打开后加载消息预览";
+  return session.preview || (cached && cached.preview) || "尚无 Assistant 回复";
 }
 
 function sessionMessageText(message) {
@@ -2660,7 +2697,7 @@ function cacheSessionMessages(sessionId, messages) {
   const preview = sessionMessageText(firstAssistant).slice(0, 72);
   if (!title && !preview) return;
   state.sessionContentCache.set(sessionId, {
-    title: (existing && existing.title) || title || sessionId.slice(-16),
+    title: (existing && existing.title) || title || "新会话",
     preview: (existing && existing.preview) || preview || "尚无 Assistant 回复",
   });
   renderSessionList();
@@ -2780,35 +2817,60 @@ function renderSessionList() {
 }
 
 async function loadSessions() {
+  const requestVersion = ++state.sessionListVersion;
+  const viewVersion = state.executionViewVersion;
+  const refresh = $("#refresh-sessions");
+  if (refresh) refresh.disabled = true;
   try {
-    const data = await fetch("/api/web/sessions").then((r) => r.json());
-    state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const response = await fetch("/api/web/sessions");
+    const data = await response.json();
+    if (requestVersion !== state.sessionListVersion) return;
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
+    if (!Array.isArray(data.sessions)) throw new Error("会话列表格式无效");
+    state.sessions = data.sessions;
     renderSessionList();
     if (!$("#search-dialog")?.hidden) renderLoadedSearchResults();
-  } catch (e) { /* 忽略 */ }
+    if (isCurrentExecutionViewVersion(viewVersion)) setSessionFeedback("", "");
+  } catch (e) {
+    if (requestVersion === state.sessionListVersion && isCurrentExecutionViewVersion(viewVersion)) {
+      setSessionFeedback("error", "会话列表读取失败，已保留当前列表；可点击刷新重试：" + e.message);
+    }
+  } finally {
+    if (refresh && requestVersion === state.sessionListVersion) refresh.disabled = false;
+  }
 }
 
 async function openSession(sessionId) {
   if (!canChangeSession()) return;
   const viewVersion = advanceExecutionViewVersion();
-  state.sessionId = sessionId;
-  const navigationWasOpen = document.body.classList.contains("navigation-open");
-  setNavigationOpen(false, navigationWasOpen);
-  // 高亮
-  $$("#session-list .session-item").forEach((el) => el.classList.toggle("active", el.dataset.sessionId === sessionId));
-  // 加载消息
+  state.pendingSessionId = sessionId;
+  setSessionFeedback("", "正在读取会话，当前对话保持不变…");
   try {
-    const data = await fetch(`/api/web/sessions/${sessionId}/messages`).then((r) => r.json());
-    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
-    cacheSessionMessages(sessionId, data.messages || []);
-    renderHistory(data.messages || []);
+    const response = await fetch(`/api/web/sessions/${encodeURIComponent(sessionId)}/messages`);
+    const data = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion)) return;
+    if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
+    if (!Array.isArray(data.messages)) throw new Error("会话消息格式无效");
+    // 消息读取成功后再一次性提交导航，避免旧内容和新 session_id 错配。
+    const changingSession = state.sessionId !== sessionId;
+    state.sessionId = sessionId;
+    if (changingSession) resetExecutionPresentation();
+    const navigationWasOpen = document.body.classList.contains("navigation-open");
+    setNavigationOpen(false, navigationWasOpen);
+    $$("#session-list .session-item").forEach((el) => el.classList.toggle("active", el.dataset.sessionId === sessionId));
+    cacheSessionMessages(sessionId, data.messages);
+    renderHistory(data.messages);
     const session = state.sessions.find((item) => item.session_id === sessionId) || { session_id: sessionId };
     const title = $("#workspace-title");
     if (title) title.textContent = sessionTitle(session);
-    setStatus(`会话 ${sessionId.slice(-12)}`);
+    setStatus("已打开：" + sessionTitle(session));
+    setSessionFeedback("", "");
   } catch (e) {
-    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
-    addErrorMsg("加载会话失败: " + e.message);
+    if (!isCurrentExecutionViewVersion(viewVersion)) return;
+    setSessionFeedback("error", "加载会话失败，已保留当前对话；点击目标会话可重试：" + e.message);
+    return;
+  } finally {
+    if (isCurrentExecutionViewVersion(viewVersion)) state.pendingSessionId = null;
   }
   if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
   loadOrchestrations(sessionId, viewVersion);
@@ -3083,14 +3145,10 @@ function toolHistoryToCardData(message, declaredCall) {
   };
 }
 
-function newSession() {
-  if (!canChangeSession()) return;
-  setPrimaryView("chat");
-  advanceExecutionViewVersion();
+function resetExecutionPresentation() {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionTimer = null;
   state.abortCtrl = null;
-  state.sessionId = null;
   state.executionId = null;
   state.activeAssistantElement = null;
   resetExecutionEventCursor();
@@ -3118,14 +3176,23 @@ function newSession() {
   }
   updateExecutionStatus("idle", "准备就绪", "提交任务后，执行过程会实时显示在右侧。");
   renderExecutionMetrics();
+  $("#orch-list").innerHTML = "";
+  $("#orch-count").textContent = "0";
+  renderExecutionHistory([]);
+}
+
+function newSession() {
+  if (!canChangeSession()) return;
+  setPrimaryView("chat");
+  advanceExecutionViewVersion();
+  state.sessionId = null;
+  state.pendingSessionId = null;
+  resetExecutionPresentation();
+  setSessionFeedback("", "");
   const navigationWasOpen = document.body.classList.contains("navigation-open");
   setNavigationOpen(false, navigationWasOpen);
   $("#messages").innerHTML = renderWelcome();
   $$("#session-list .session-item").forEach((el) => el.classList.remove("active"));
-  // 清空编排记录列表
-  $("#orch-list").innerHTML = "";
-  $("#orch-count").textContent = "0";
-  renderExecutionHistory([]);
   setStatus("新会话");
 }
 
@@ -3628,7 +3695,9 @@ function paneWidthLimits(name) {
   const otherName = name === "sidebar" ? "inspector" : "sidebar";
   const otherConfig = PANE_WIDTH_CONFIG[otherName];
   const railWidth = $("#app-rail")?.getBoundingClientRect().width || 60;
-  const otherWidth = $(otherConfig.element)?.getBoundingClientRect().width || otherConfig.min;
+  const otherHidden = otherName === "sidebar"
+    ? document.body.classList.contains("sidebar-collapsed") : isInspectorCollapsed();
+  const otherWidth = otherHidden ? 0 : ($(otherConfig.element)?.getBoundingClientRect().width || otherConfig.min);
   const available = window.innerWidth - railWidth - otherWidth - 420 - 12;
   return { min: config.min, max: Math.max(config.min, Math.min(config.max, available)) };
 }
@@ -3750,6 +3819,50 @@ function isInspectorCollapsed() {
     : document.body.classList.contains("inspector-collapsed");
 }
 
+function persistPaneVisibility() {
+  try {
+    localStorage.setItem(PANE_VISIBILITY_STORAGE_KEY, JSON.stringify({
+      sidebar: uiState.desktopSidebarCollapsed === true,
+      inspector: uiState.desktopInspectorCollapsed === true,
+    }));
+  } catch (error) { /* 页面内仍可调整布局 */ }
+}
+
+function setSidebarCollapsed(collapsed, focusControl = false) {
+  uiState.desktopSidebarCollapsed = collapsed === true;
+  const hidden = !isMobileNavigationViewport() && uiState.desktopSidebarCollapsed;
+  document.body.classList.toggle("sidebar-collapsed", hidden);
+  const toggle = $("#toggle-sidebar");
+  if (toggle) {
+    toggle.title = hidden ? "展开左侧栏" : "收起左侧栏";
+    toggle.setAttribute("aria-label", toggle.title);
+    toggle.setAttribute("aria-expanded", String(!hidden));
+    if (focusControl) toggle.focus();
+  }
+  const navigation = $("#primary-navigation");
+  if (navigation && !isMobileNavigationViewport()) {
+    navigation.setAttribute("aria-hidden", String(hidden));
+    navigation.inert = hidden;
+  }
+  const resizer = $("#sidebar-resizer");
+  if (resizer) resizer.tabIndex = hidden ? -1 : 0;
+  persistPaneVisibility();
+  if (!hidden) requestAnimationFrame(() => {
+    Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
+      if (Number.isFinite(uiState.paneWidths?.[name])) setPaneWidth(name, uiState.paneWidths[name], false);
+    });
+    redrawVisibleInspectorGraphs();
+  });
+}
+
+function restorePaneVisibility() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PANE_VISIBILITY_STORAGE_KEY) || "{}") || {}; } catch (error) { /* 使用默认 */ }
+  uiState.desktopInspectorCollapsed = saved.inspector === true;
+  setSidebarCollapsed(saved.sidebar === true);
+  setInspectorCollapsed(isCompactInspectorViewport() || uiState.desktopInspectorCollapsed);
+}
+
 function isElementFocusable(element) {
   if (!element || element.disabled || element.getAttribute("aria-hidden") === "true"
       || element.getAttribute("tabindex") === "-1") return false;
@@ -3811,7 +3924,8 @@ function setDrawerBackgroundInert() {
   setInert("#global-header", navigationOpen || inspectorOpen);
   setInert("#app-rail", navigationOpen || inspectorOpen);
   setInert(".main", navigationOpen);
-  setInert("#primary-navigation", inspectorOpen || (isMobileNavigationViewport() && !navigationOpen));
+  setInert("#primary-navigation", inspectorOpen || (isMobileNavigationViewport() && !navigationOpen)
+    || (!isMobileNavigationViewport() && uiState.desktopSidebarCollapsed === true));
   [".chat-header", "#chat-view", "#resource-workspace"].forEach((selector) => setInert(selector, inspectorOpen));
 }
 
@@ -3838,6 +3952,8 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
   } else {
     document.body.classList.remove("inspector-expanded");
     document.body.classList.toggle("inspector-collapsed", collapsed);
+    uiState.desktopInspectorCollapsed = collapsed;
+    persistPaneVisibility();
   }
 
   if (panel) {
@@ -3862,6 +3978,14 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
     openButton.setAttribute("aria-label", openButton.title);
     openButton.setAttribute("aria-expanded", String(!collapsed));
   }
+  const globalToggle = $("#toggle-right-pane");
+  if (globalToggle) {
+    globalToggle.title = collapsed ? "展开右侧栏" : "收起右侧栏";
+    globalToggle.setAttribute("aria-label", globalToggle.title);
+    globalToggle.setAttribute("aria-expanded", String(!collapsed));
+  }
+  const resizer = $("#inspector-resizer");
+  if (resizer) resizer.tabIndex = collapsed ? -1 : 0;
   if (backdrop) {
     backdrop.setAttribute("aria-hidden", String(collapsed));
     backdrop.tabIndex = -1;
@@ -3869,6 +3993,11 @@ function setInspectorCollapsed(collapsed, focusControl = false) {
   setDrawerBackgroundInert();
 
   if (!collapsed) requestAnimationFrame(redrawVisibleInspectorGraphs);
+  if (!collapsed && !compactInspector) {
+    Object.keys(PANE_WIDTH_CONFIG).forEach((name) => {
+      if (Number.isFinite(uiState.paneWidths?.[name])) setPaneWidth(name, uiState.paneWidths[name], false);
+    });
+  }
 
   if (focusControl) {
     focusInspectorControl(collapsed, collapsed ? null : closeButton);
@@ -3880,6 +4009,7 @@ function setNavigationOpen(open, focusControl = false) {
   const navigation = $("#primary-navigation");
   const backdrop = $("#navigation-backdrop");
   const active = isMobileNavigationViewport() && open;
+  const hidden = !active && (isMobileNavigationViewport() || uiState.desktopSidebarCollapsed === true);
   if (focusControl && active) state.navigationReturnFocus = document.activeElement;
   if (active && !isInspectorCollapsed()) setInspectorCollapsed(true);
   document.body.classList.toggle("navigation-open", active);
@@ -3889,7 +4019,7 @@ function setNavigationOpen(open, focusControl = false) {
     toggle.setAttribute("aria-expanded", String(active));
   }
   if (navigation) {
-    navigation.setAttribute("aria-hidden", String(!active && isMobileNavigationViewport()));
+    navigation.setAttribute("aria-hidden", String(hidden));
     if (active) {
       navigation.setAttribute("role", "dialog");
       navigation.setAttribute("aria-modal", "true");
@@ -3897,7 +4027,7 @@ function setNavigationOpen(open, focusControl = false) {
       navigation.removeAttribute("role");
       navigation.removeAttribute("aria-modal");
     }
-    if ("inert" in navigation) navigation.inert = !active && isMobileNavigationViewport();
+    if ("inert" in navigation) navigation.inert = hidden;
   }
   if (backdrop) {
     backdrop.setAttribute("aria-hidden", String(!active));
@@ -4646,6 +4776,7 @@ function bindRovingTablist(selector) {
 
 /* ================= 事件绑定 ================= */
 function bindEvents() {
+  bindColorThemes();
   const input = $("#input");
   const sendBtn = $("#send");
   const newBtns = $$("#new-session, [data-new-session]");
@@ -4669,6 +4800,7 @@ function bindEvents() {
     input.style.height = Math.min(input.scrollHeight, 120) + "px";
   });
   newBtns.forEach((newBtn) => newBtn.addEventListener("click", newSession));
+  $("#refresh-sessions")?.addEventListener("click", loadSessions);
   $$("[data-session-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.sessionFilter = button.dataset.sessionFilter || "recent";
@@ -4807,15 +4939,18 @@ function bindEvents() {
   const inspectorViewport = window.matchMedia("(max-width: 1279px)");
   const navigationViewport = window.matchMedia("(max-width: 959px)");
   const syncResponsiveControls = () => {
-    setInspectorCollapsed(isCompactInspectorViewport() ? !document.body.classList.contains("inspector-expanded") : document.body.classList.contains("inspector-collapsed"));
+    setSidebarCollapsed(uiState.desktopSidebarCollapsed === true);
+    setInspectorCollapsed(isCompactInspectorViewport() ? !document.body.classList.contains("inspector-expanded") : uiState.desktopInspectorCollapsed === true);
     setNavigationOpen(document.body.classList.contains("navigation-open"));
   };
   if (typeof inspectorViewport.addEventListener === "function") {
     inspectorViewport.addEventListener("change", syncResponsiveControls);
     navigationViewport.addEventListener("change", syncResponsiveControls);
   }
+  restorePaneVisibility();
   bindPaneResizers();
-  setInspectorCollapsed(isCompactInspectorViewport());
+  $("#toggle-sidebar")?.addEventListener("click", () => setSidebarCollapsed(!uiState.desktopSidebarCollapsed, true));
+  $("#toggle-right-pane")?.addEventListener("click", () => setInspectorCollapsed(!isInspectorCollapsed(), true));
   setNavigationOpen(false);
   setPrimaryView(uiState.primaryView);
   setInspectorSection(uiState.inspectorSection);
@@ -4902,11 +5037,16 @@ async function loadFiles() {
 /* ================= 会话删除 ================= */
 async function deleteSession(sessionId) {
   if (!canChangeSession()) return;
-  if (!confirm(`删除会话 ${sessionId.slice(-12)}？`)) return;
+  const session = state.sessions.find((item) => item.session_id === sessionId) || { session_id: sessionId };
+  if (!confirm(`删除会话「${sessionTitle(session)}」？`)) return;
   try {
     const response = await fetch(`/api/web/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.detail || "HTTP " + String(response.status));
+    if (state.pendingSessionId === sessionId) {
+      advanceExecutionViewVersion();
+      state.pendingSessionId = null;
+    }
     if (state.sessionId === sessionId) newSession();
     setSessionFeedback("success", "会话已删除。");
     loadSessions();
