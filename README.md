@@ -14,7 +14,7 @@ ReAgent 使用 OpenAI-compatible 接口接入模型；没有配置模型密钥�
 | 多 Agent 编排 | 基于档案的分工、依赖图调度、并行执行、嵌套深度限制和结果持久化。 |
 | MCP 与 Skill | 接入 stdio / SSE MCP Server；按触发条件加载可复用 Skill。 |
 | 可观测性 | JSONL Trace、调用树、评测与回归结果。 |
-| Web UI | SSE 实时展示决策、工具状态、Trace、并行编排和会话历史；支持移动端布局。 |
+| Web UI | 执行工作台以 SSE 实时展示决策、工具状态、Trace 与并行编排；执行事件可持久化、回放和取消，支持会话主题/预览、四套配色、明暗模式、可调节面板与移动端布局。 |
 
 ## 快速开始
 
@@ -118,7 +118,7 @@ flowchart TB
     Orchestrator -. Trace .-> Trace
 ```
 
-`/api/web/*` 面向交互式页面：请求在 API 进程内执行，并可通过 SSE 返回过程事件。`/api/chat` 面向异步任务：Gateway 只负责入队，Worker 执行 Agent，因此可按需横向扩展。
+`/api/web/*` 面向交互式页面：请求在 API 进程内执行，并可通过 SSE 返回过程事件；执行事实会写入 SQLite，供时间线、历史回放和取消状态使用。`/api/chat` 面向异步任务：Gateway 只负责入队，Worker 执行 Agent，因此可按需横向扩展。
 
 ### Web UI 的实时执行流程
 
@@ -160,6 +160,9 @@ curl -X POST http://127.0.0.1:8000/api/web/chat \
 | `POST /api/web/chat` | 同步运行 Agent，返回回答、工具调用、计划和 Trace。 |
 | `POST /api/web/chat/stream` | SSE 流式运行 Agent。 |
 | `GET /api/web/sessions` | 查看 Web UI 会话。 |
+| `GET /api/web/sessions/{session_id}/executions` | 查看会话的执行历史。 |
+| `GET /api/web/executions/{execution_id}/stream` | 回放执行事件，并续接活动执行。 |
+| `POST /api/web/executions/{execution_id}/cancel` | 请求取消排队或运行中的直连执行。 |
 | `POST /api/web/orchestrate` | 运行多 Agent 编排。 |
 | `GET /api/web/settings` | 查看可公开的运行配置与子 Agent 启用状态（不回显密钥）。 |
 | `PATCH /api/web/settings` | 保存模型、密钥与编排配置，重启后生效。 |
@@ -192,6 +195,18 @@ curl http://127.0.0.1:8000/api/web/agents
 ```
 
 最后一个接口默认应返回 4 个内置档案；若 `enabled=false`，在 Settings 中启用编排并重启服务。自定义档案现在固定保存到 `/data/agent_profiles.json`，重建容器不会再丢失。
+
+### Redis 异步队列的数据模型
+
+`POST /api/chat` 使用 Redis **List**，不是 Redis Stream：生产端将 `job_id` 写入 `agent:jobs:queue`（`RPUSH`），Worker 通过 `BLPOP` 阻塞取出任务。相关键分别保存不同职责的数据：
+
+| 键 | Redis 类型 | 用途 |
+| --- | --- | --- |
+| `agent:jobs:queue` | List | 待处理的 `job_id` 队列。 |
+| `agent:jobs:{job_id}` | Hash | Job 的输入、状态、结果、错误和 Trace 上下文。 |
+| `agent:requests:{request_id}` | String | `SET NX` 幂等键，防止相同请求重复入队。 |
+
+因此，当前队列不使用 `XADD`、`XREADGROUP` 或消费者组；Redis Stream 也没有用于异步任务分发。
 
 ## 项目结构
 
@@ -255,6 +270,7 @@ python -m evals.runner --compare evals/runs/<baseline>.json
 - [阶段 1：ReAct Loop](docs/stage1.md)
 - [阶段 12：多 Agent 编排](docs/stage12.md)
 - [前端审查与实施计划](docs/frontend-audit-plan.md)
+- [Agent 工作台与执行透明化指南](docs/agent-workbench-guide.md)
 - [UI 与底层改进记录](docs/ui-runtime-improvements-2026-09-12.md)
 - [MARL 科研助手演进规划（尚未实施）](docs/marl-research-assistant-roadmap.md)
 - [演示录制指南](docs/demo-guide.md)
