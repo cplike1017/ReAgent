@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from app.agent.runtime import AgentRuntime
 from app.api.routes import router
 from app.api.web import router as web_router
+from app.api.research import router as research_router, research_error_handler
 from app.checkpoint.repository import SQLiteCheckpointRepository
 from app.execution.repository import SQLiteExecutionRepository
 from app.config import Settings, get_settings, load_runtime_settings
@@ -29,6 +30,10 @@ from app.llm.client import create_llm_client
 from app.mcp.client import MCPClientManager
 from app.memory.store import MemoryStore
 from app.queue.producer import RedisJobQueue
+from app.research.artifacts import ArtifactStore
+from app.research.errors import ResearchError
+from app.research.repository import SQLiteResearchRepository
+from app.research.service import ResearchService
 from app.session.repository import SQLiteSessionRepository
 from app.skills.manager import SkillManager
 from app.tools.builtin import build_default_registry
@@ -124,6 +129,16 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         # 直连 Web 运行任务按 execution_id 保存，供断线续接和显式取消使用。
         app.state.web_execution_tasks = {}
 
+        research_repository = None
+        app.state.research_service = None
+        if settings.research_enabled:
+            research_repository = SQLiteResearchRepository(settings.database_url)
+            app.state.research_service = ResearchService(
+                research_repository,
+                ArtifactStore(settings.research_artifact_dir, settings.sandbox_dir,
+                              settings.research_max_artifact_bytes),
+            )
+
         # 5) 后台预初始化 MCP（不阻塞 Web 启动；工具在后台陆续注册）
         mcp_task = None
         if app.state.runtime.mcp_client is not None:
@@ -169,11 +184,15 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         if app.state.runtime.memory is not None:
             app.state.runtime.memory.close()
         execution_repository.close()
+        if research_repository is not None:
+            research_repository.close()
         await client.aclose()
 
     app = FastAPI(title=settings.app_name, version=settings.agent_version, lifespan=lifespan)
     app.include_router(router)
     app.include_router(web_router)
+    app.include_router(research_router)
+    app.add_exception_handler(ResearchError, research_error_handler)
     # Web UI 静态资源
     app.mount("/", StaticFiles(directory="app/static", html=True), name="static")
     return app

@@ -11,6 +11,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -82,6 +83,11 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/agent.db"
     # 执行详情单条最大保留字节数；SSE 始终只发送更短的预览。
     execution_output_max_bytes: int = 262144
+
+    # ---------- Research foundation（本地单用户；默认关闭）----------
+    research_enabled: bool = False
+    research_artifact_dir: str = "./data/research-artifacts"
+    research_max_artifact_bytes: int = Field(default=20 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
 
     # ---------- Agent 运行时 ----------
     # Context Builder 滑动窗口条数

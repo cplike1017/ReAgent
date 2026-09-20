@@ -1,0 +1,5 @@
+data_origin,run_id,training_seed,eval_episode,environment_steps,episode_return
+synthetic,fixture_seed_0,0,0,100,10
+synthetic,fixture_seed_0,0,1,100,20
+synthetic,fixture_seed_1,1,0,100,12
+synthetic,fixture_seed_1,1,1,100,18

@@ -1,0 +1,2 @@
+# Keep fixture hashes stable across Windows and Unix checkouts.
+demos/fixtures/research/* text eol=lf

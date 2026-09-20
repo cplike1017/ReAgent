@@ -26,6 +26,7 @@ services:
       TRACE_FILE: /data/traces.jsonl
       RUNTIME_CONFIG_FILE: /data/runtime-settings.json
       AGENT_PROFILES_FILE: /data/agent_profiles.json
+      RESEARCH_ARTIFACT_DIR: /data/research-artifacts
     env_file:
       - path: .env
         required: false

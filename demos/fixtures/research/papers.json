@@ -1,0 +1,29 @@
+[
+  {
+    "source": "arxiv",
+    "source_id": "1707.06347",
+    "version": "v2",
+    "title": "Proximal Policy Optimization Algorithms",
+    "authors": ["John Schulman", "Filip Wolski", "Prafulla Dhariwal", "Alec Radford", "Oleg Klimov"],
+    "source_url": "https://arxiv.org/abs/1707.06347v2",
+    "published_at": "2017-08-28"
+  },
+  {
+    "source": "arxiv",
+    "source_id": "1709.06560",
+    "version": "v3",
+    "title": "Deep Reinforcement Learning that Matters",
+    "authors": ["Peter Henderson", "Riashat Islam", "Philip Bachman", "Joelle Pineau", "Doina Precup", "David Meger"],
+    "source_url": "https://arxiv.org/abs/1709.06560v3",
+    "published_at": "2019-01-30"
+  },
+  {
+    "source": "arxiv",
+    "source_id": "2108.13264",
+    "version": "v1",
+    "title": "Deep Reinforcement Learning at the Edge of the Statistical Precipice",
+    "authors": ["Rishabh Agarwal", "Max Schwarzer", "Pablo Samuel Castro", "Aaron Courville", "Marc G. Bellemare"],
+    "source_url": "https://arxiv.org/abs/2108.13264v1",
+    "published_at": "2021-08-30"
+  }
+]
