@@ -184,15 +184,17 @@ M1 真实供应商验收脚本（2026-09-20）：新增隔离的公开 DQN `1312
 
 工具白名单复测使用同一论文和验收标准，只暴露 4 个必需工具：5 次模型调用、4 次工具调用、18,143 tokens，一次通过，较前次总 token 减少约 69.7%。这说明工具 Schema 是主要上下文成本之一；该白名单仅用于固定验收运行，不改变 Web 默认工具集。
 
-Web Agent 工具、R02 的结构化 arXiv 元数据/摘要导入、R03 的受控 PDF 快照/页级读取、fixed 10/30 工程门槛、一个真实模型非 PPO 任务、持久查询历史和项目混合检索已经落地。下一步补 Library/Evidence Inspector、比较矩阵与导出，再进入 R04 方法卡和 ExperimentSpec 校验。R05 实现按独立训练 seed 进行的统计分析。算法特定规则和执行命令通过适配器提供，验收必须同时覆盖非 PPO 任务和不涉及训练的文献任务。
+Web Agent 工具、R02 的结构化 arXiv 元数据/摘要导入、R03 的受控 PDF 快照/页级读取、fixed 10/30 工程门槛、一个真实模型非 PPO 任务、持久查询历史、项目混合检索以及比较/引用导出已经落地。下一步补 Library/Evidence Inspector，再进入 R04 方法卡和 ExperimentSpec 校验。R05 实现按独立训练 seed 进行的统计分析。算法特定规则和执行命令通过适配器提供，验收必须同时覆盖非 PPO 任务和不涉及训练的文献任务。
 
 M1 检索切片验收（2026-09-20）：6 项查询/迁移契约、90 项科研组合回归通过；最终全量 495 passed、3 skipped，保留同一个依赖警告。Docker 在持久 `/data` 上应用迁移 `[1,2]`，真实 `qwen3.7-text-embedding` 返回 1024 维向量；两篇 synthetic 元数据的重复混合查询保持同一首位结果、2 个候选缓存和 2 条查询历史，API 重启后历史仍可读取。该验收不表示 PDF 全文已建立向量索引或结果经过人工语义判定。
+
+M1 比较与引用导出验收（2026-09-20）：项目级 CSV/BibTeX API 和两个 Agent 工具契约通过；科研组合 93 passed，最终全量 498 passed、3 skipped，另有 5 条既有 PyMuPDF SWIG 类型弃用警告。重复导出逐字节一致，跨项目资料不会进入结果；CSV 只汇总已保存的来源、阅读范围、Evidence 数量和关联 Claim，BibTeX 保留精确版本。该导出不推断论文方法结论，也不完成 Claim 的语义核验。
 
 <a id="research-chat-tools"></a>
 
 ## 8. Web 聊天科研工具
 
-启用 `RESEARCH_ENABLED=true` 并重启 API 后，Web 直连聊天的工具列表增加以下 16 个工具。主 Agent 使用现有模型选择工具；ReAct 和 Plan 执行均沿用 ToolGateway。关闭科研开关时不注册工具、不创建科研表。API 与工具共享服务、数据库和快照目录。
+启用 `RESEARCH_ENABLED=true` 并重启 API 后，Web 直连聊天的工具列表增加以下 18 个工具。主 Agent 使用现有模型选择工具；ReAct 和 Plan 执行均沿用 ToolGateway。关闭科研开关时不注册工具、不创建科研表。API 与工具共享服务、数据库和快照目录。
 
 | 工具 | 用途 |
 | --- | --- |
@@ -209,6 +211,8 @@ M1 检索切片验收（2026-09-20）：6 项查询/迁移契约、90 项科研�
 | `research_create_evidence` | 校验摘录真实存在于指定资料页 |
 | `research_create_claim` | 保存证据关联与待核验主张 |
 | `research_export_report` | 返回含项目 ID 的 Markdown 正文 |
+| `research_export_comparison` | 返回项目论文、阅读范围、证据数和关联主张的 CSV |
+| `research_export_bibtex` | 返回项目内精确论文版本的 BibTeX |
 
 将资料放入 `SANDBOX_DIR` 后，可在 Web 聊天中输入：
 
@@ -219,6 +223,8 @@ M1 检索切片验收（2026-09-20）：6 项查询/迁移契约、90 项科研�
 分页列表默认 50、最多 200 条；页读取最多 20000 字符，`next_offset` 非空时继续读取。`resource` 只接受四种科研集合；额外输入字段和 `verification_status=verified` 被拒绝。错误保留 `research_not_found`、`research_invalid`、`research_conflict` 等领域代码，模型应先核对来源和参数。创建项目、证据与主张尚无业务幂等键；Gateway 不自动重试这些领域失败，超时后需先查询是否已经写入，避免重复创建。
 
 同一链路保留工具结果、会话消息和现有 Trace（按 Trace 配置采集）。`locator_verified` 仅证明摘录定位；`verification_status` 固定为 `unverified`。导出报告返回正文，不创建额外文件；二进制资料下载仍走 API。
+
+比较矩阵和引用也只从单个项目的持久记录生成：`GET /api/research/projects/{project_id}/exports/comparison.csv` 汇总论文版本、来源、阅读范围、Evidence 数量和已关联的待核验 Claim；`GET /api/research/projects/{project_id}/exports/references.bib` 为 arXiv、DOI 或本地来源生成稳定引用键和版本字段。两种导出均不会从标题或摘要推断方法结论，也不会将 Claim 提升为已核验。
 
 当前接入 Web 进程内运行时。Redis Worker 工厂尚未注入科研服务；Web 编排中的 researcher 档案可使用 `research_*`，其他专用档案保持原白名单。单用户项目关联校验不等同于多用户权限控制。
 

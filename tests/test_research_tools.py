@@ -56,6 +56,18 @@ async def test_tools_share_api_storage_and_preserve_provenance(research_client):
     assert report["project_id"] == pid
     assert report["markdown"] == client.get(f"/api/research/projects/{pid}/report").text
     assert span["evidence_id"] in report["markdown"] and "unverified" in report["markdown"]
+    comparison = await call(client, "research_export_comparison", project_id=pid)
+    assert comparison == {
+        "project_id": pid,
+        "csv": client.get(f"/api/research/projects/{pid}/exports/comparison.csv").text,
+    }
+    assert paper["paper_version_id"] in comparison["csv"]
+    citations = await call(client, "research_export_bibtex", project_id=pid)
+    assert citations == {
+        "project_id": pid,
+        "bibtex": client.get(f"/api/research/projects/{pid}/exports/references.bib").text,
+    }
+    assert "Synthetic notes" in citations["bibtex"]
 
 
 async def test_tools_reject_cross_project_and_fabricated_evidence(research_client):
@@ -86,6 +98,8 @@ async def test_tools_reject_cross_project_and_fabricated_evidence(research_clien
     ("research_read_page", {"project_id": "p", "paper_version_id": "v", "page": 0}),
     ("research_create_claim", {"project_id": "p", "text": "Claim", "verification_status": "verified"}),
     ("research_export_report", {}),
+    ("research_export_comparison", {}),
+    ("research_export_bibtex", {}),
 ])
 async def test_tool_input_contracts(research_client, name, args):
     result = await research_client.app.state.runtime.tool_gateway.execute(name, args)

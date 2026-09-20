@@ -108,6 +108,18 @@ def export_report(project_id: str, service: Service):
                     headers={"Content-Disposition": 'attachment; filename="research-report.md"'})
 
 
+@router.get("/projects/{project_id}/exports/comparison.csv")
+def export_comparison(project_id: str, service: Service):
+    return Response(service.export_comparison(project_id), media_type="text/csv",
+                    headers={"Content-Disposition": 'attachment; filename="comparison.csv"'})
+
+
+@router.get("/projects/{project_id}/exports/references.bib")
+def export_bibtex(project_id: str, service: Service):
+    return Response(service.export_bibtex(project_id), media_type="application/x-bibtex",
+                    headers={"Content-Disposition": 'attachment; filename="references.bib"'})
+
+
 @router.post("/projects/{project_id}/search")
 async def search_project(project_id: str, body: ResearchSearchRequest, service: Service):
     return await service.search_project(project_id, body)

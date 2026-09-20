@@ -1,5 +1,8 @@
 """Source-backed evidence and deterministic research reports."""
+import csv
 import hashlib
+import io
+import re
 
 from app.research.artifacts import ArtifactStore
 from app.research.errors import ResearchConflict, ResearchError
@@ -170,11 +173,100 @@ class ResearchService:
         )
         return self.repository.save_evidence(record)
 
-    def export_report(self, project_id: str) -> str:
+    def _export_snapshot(self, project_id: str):
         project, records = self.repository.report_snapshot(project_id)
         for collection in records.values():
             if len(collection) > 1000:
-                raise ResearchError("首版报告限制每类 1000 条记录，请缩小项目范围")
+                raise ResearchError("首版导出限制每类 1000 条记录，请缩小项目范围")
+        return project, records
+
+    def export_comparison(self, project_id: str) -> str:
+        """Export a source-backed library matrix without inferring paper findings."""
+        _, records = self._export_snapshot(project_id)
+        evidence_by_id = {item.evidence_id: item for item in records["evidence"]}
+        evidence_by_paper = {}
+        claims_by_paper = {}
+        for item in records["evidence"]:
+            evidence_by_paper.setdefault(item.paper_version_id, []).append(item)
+        for claim in records["claims"]:
+            paper_ids = {
+                evidence_by_id[link.evidence_id].paper_version_id
+                for link in claim.evidence_links if link.evidence_id in evidence_by_id
+            }
+            for paper_id in paper_ids:
+                claims_by_paper.setdefault(paper_id, []).append(claim)
+
+        output = io.StringIO(newline="")
+        fields = [
+            "paper_version_id", "title", "source", "source_id", "version",
+            "published_at", "authors", "primary_category", "categories",
+            "content_scope", "read_scope", "read_pages", "evidence_count",
+            "linked_claim_count", "linked_claims",
+        ]
+        writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        for paper in records["papers"]:
+            evidence = evidence_by_paper.get(paper.paper_version_id, [])
+            claims = claims_by_paper.get(paper.paper_version_id, [])
+            writer.writerow({
+                "paper_version_id": paper.paper_version_id,
+                "title": paper.title,
+                "source": paper.source,
+                "source_id": paper.source_id,
+                "version": paper.version,
+                "published_at": paper.published_at,
+                "authors": "; ".join(paper.authors),
+                "primary_category": paper.primary_category,
+                "categories": "; ".join(paper.categories),
+                "content_scope": paper.content_scope or "metadata",
+                "read_scope": paper.read_scope,
+                "read_pages": ";".join(str(page) for page in paper.read_pages),
+                "evidence_count": len(evidence),
+                "linked_claim_count": len(claims),
+                "linked_claims": " | ".join(claim.text for claim in claims),
+            })
+        return output.getvalue()
+
+    @staticmethod
+    def _bibtex_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+    def export_bibtex(self, project_id: str) -> str:
+        """Export deterministic citations for the exact versions in one project."""
+        _, records = self._export_snapshot(project_id)
+        entries = []
+        used_keys = set()
+        for paper in records["papers"]:
+            identity = f"{paper.source}_{paper.source_id}_{paper.version}"
+            base_key = re.sub(r"[^a-zA-Z0-9]+", "_", identity).strip("_").lower() or "reference"
+            key = base_key
+            if key in used_keys:
+                suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:8]
+                key = f"{base_key}_{suffix}"
+            used_keys.add(key)
+            fields = [("title", paper.title)]
+            if paper.authors:
+                fields.append(("author", " and ".join(paper.authors)))
+            year = paper.published_at[:4]
+            if re.fullmatch(r"\d{4}", year):
+                fields.append(("year", year))
+            if paper.source == "arxiv":
+                fields.extend([("eprint", paper.source_id), ("archivePrefix", "arXiv")])
+                if paper.primary_category:
+                    fields.append(("primaryClass", paper.primary_category))
+            elif paper.source == "doi":
+                fields.append(("doi", paper.source_id))
+            if paper.source_url is not None:
+                fields.append(("url", str(paper.source_url)))
+            fields.append(("note", f"Version {paper.version}"))
+            body = ",\n".join(
+                f"  {name} = {{{self._bibtex_value(value)}}}" for name, value in fields
+            )
+            entries.append(f"@misc{{{key},\n{body}\n}}")
+        return "\n\n".join(entries) + ("\n" if entries else "")
+
+    def export_report(self, project_id: str) -> str:
+        project, records = self._export_snapshot(project_id)
         lines = [
             f"# {project.title}", "", f"研究问题：{project.question}", "",
             f"项目：{project.project_id}", "", "## 当前证据边界", "",

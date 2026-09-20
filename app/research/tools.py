@@ -129,6 +129,12 @@ def register_research_tools(registry: ToolRegistry, service: ResearchService) ->
     def export_report(project_id):
         return {"project_id": project_id, "markdown": service.export_report(project_id)}
 
+    def export_comparison(project_id):
+        return {"project_id": project_id, "csv": service.export_comparison(project_id)}
+
+    def export_bibtex(project_id):
+        return {"project_id": project_id, "bibtex": service.export_bibtex(project_id)}
+
     async def search_project(project_id, **body):
         return await service.search_project(project_id, ResearchSearchRequest(**body))
 
@@ -171,6 +177,10 @@ def register_research_tools(registry: ToolRegistry, service: ResearchService) ->
          "保存事实陈述、推断或假设并关联本项目证据；服务端固定为 unverified，不能自称已核验。supports/refutes/background 表达关系；写入失败先查询，避免重复。"),
         ("research_export_report", ProjectArgs, export_report, "low",
          "从项目记录导出确定性 Markdown 报告，返回正文及项目 ID；保留证据 ID、hash、未核验与未训练边界。无统计或训练能力，不凭空补指标；记录过多时缩小项目。"),
+        ("research_export_comparison", ProjectArgs, export_comparison, "low",
+         "导出项目内论文版本的确定性 CSV 比较矩阵，包含来源、阅读范围、证据数和已关联的待核验主张；只汇总已保存记录，不推断论文结论。"),
+        ("research_export_bibtex", ProjectArgs, export_bibtex, "low",
+         "为项目内精确论文版本导出确定性 BibTeX；保留 arXiv/DOI、版本、作者和来源 URL，不表示已阅读或核验论文内容。"),
     ]
     for name, model, operation, risk, description in definitions:
         registry.register(ToolDefinition(

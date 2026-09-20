@@ -1,6 +1,8 @@
 """Local research API contracts; no network, Redis server or model calls."""
 import sqlite3
 import hashlib
+import csv
+import io
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -209,6 +211,57 @@ def test_evidence_validates_source_and_claim_stays_unverified(research_client):
     assert artifact["sha256"] in report.text
     assert "unverified" in report.text
     assert "训练尚未执行" in report.text
+
+
+def test_literature_exports_are_deterministic_and_project_scoped(research_client):
+    project = create_project(research_client, "Comparison")
+    other = create_project(research_client, "Other")
+    artifact = import_artifact(research_client, project)
+    paper = import_paper(
+        research_client, project, artifact["artifact_id"],
+        source="arxiv", source_id="1707.06347", version="v2",
+        title="Proximal Policy Optimization Algorithms",
+        authors=["John Schulman", "Filip Wolski"],
+        source_url="https://arxiv.org/abs/1707.06347v2",
+        published_at="2017-07-20T00:00:00Z",
+        categories=["cs.LG", "cs.AI"], primary_category="cs.LG",
+    )
+    span = evidence(research_client, project, paper["paper_version_id"]).json()
+    claim = research_client.post(f"/api/research/projects/{project}/claims", json={
+        "text": "The fixture describes a fixed evaluation protocol.",
+        "kind": "fact",
+        "evidence_links": [{"evidence_id": span["evidence_id"], "relation": "supports"}],
+    }).json()
+    import_paper(research_client, other, title="Must stay outside the export")
+
+    comparison_url = f"/api/research/projects/{project}/exports/comparison.csv"
+    first = research_client.get(comparison_url)
+    second = research_client.get(comparison_url)
+    assert first.status_code == 200 and first.content == second.content
+    assert "text/csv" in first.headers["content-type"]
+    assert 'filename="comparison.csv"' in first.headers["content-disposition"]
+    rows = list(csv.DictReader(io.StringIO(first.text)))
+    assert len(rows) == 1
+    assert rows[0]["paper_version_id"] == paper["paper_version_id"]
+    assert rows[0]["read_pages"] == "1"
+    assert rows[0]["evidence_count"] == "1"
+    assert rows[0]["linked_claim_count"] == "1"
+    assert claim["text"] in rows[0]["linked_claims"]
+    assert "Must stay outside" not in first.text
+
+    bibtex_url = f"/api/research/projects/{project}/exports/references.bib"
+    bibtex = research_client.get(bibtex_url)
+    assert bibtex.status_code == 200
+    assert bibtex.content == research_client.get(bibtex_url).content
+    assert "application/x-bibtex" in bibtex.headers["content-type"]
+    assert 'filename="references.bib"' in bibtex.headers["content-disposition"]
+    assert "@misc{arxiv_1707_06347_v2," in bibtex.text
+    assert "title = {Proximal Policy Optimization Algorithms}" in bibtex.text
+    assert "author = {John Schulman and Filip Wolski}" in bibtex.text
+    assert "year = {2017}" in bibtex.text
+    assert "eprint = {1707.06347}" in bibtex.text
+    assert "primaryClass = {cs.LG}" in bibtex.text
+    assert "Must stay outside" not in bibtex.text
 
 
 @pytest.mark.parametrize("updates", [
