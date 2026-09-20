@@ -68,7 +68,13 @@ class Settings(BaseSettings):
 
     # ---------- Redis 队列 ----------
     redis_url: str = "redis://localhost:6379/0"
+    # 旧 List 键保留用于回滚，不在 Stream 实现中原地改型。
     queue_name: str = "agent:jobs:queue"
+    queue_stream_name: str = "agent:jobs:stream"
+    queue_consumer_group: str = "agent-workers"
+    queue_claim_idle_ms: int = 60_000
+    queue_heartbeat_ms: int = 20_000
+    queue_read_block_ms: int = 1_000
     job_key_prefix: str = "agent:jobs:"
     request_key_prefix: str = "agent:requests:"
 

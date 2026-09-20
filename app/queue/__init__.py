@@ -1,1 +1,1 @@
-"""Queue 包：基于 Redis List 的自研任务队列（不用 Celery / RQ）。"""
+"""Queue 包：基于 Redis Stream Consumer Group 的任务队列。"""

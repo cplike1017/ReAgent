@@ -12,7 +12,7 @@ Stage 4 Demo：Redis Queue + Worker。
     B. 失败重试：Worker 崩溃 -> attempt 递增重入队 -> 达到上限 FAILED（不无限重试）
 
 说明：本 Demo 在同一进程内用 asyncio 任务模拟 3 个 Worker（对应生产环境的
-3 个容器/进程）；消息分发机制与多进程完全一致（Redis BLPOP）。
+3 个容器/进程）；消息分发机制与多进程完全一致（Redis Consumer Group）。
 """
 import asyncio
 import random
@@ -63,7 +63,10 @@ async def main() -> None:
         return
 
     print(f"Redis 已连接: {settings.redis_url}")
-    print(f"队列名: {settings.queue_name} | max_attempts: {settings.max_attempts}")
+    print(
+        f"Stream: {settings.queue_stream_name} | group: {settings.queue_consumer_group} "
+        f"| max_attempts: {settings.max_attempts}"
+    )
 
     # =================================================================
     print("\n" + SEPARATOR)
@@ -86,8 +89,7 @@ async def main() -> None:
     print(f"已入队 {len(job_ids)} 个 Job，队列长度 = {await queue.queue_length()}")
 
     # 2) 启动 3 个并发消费者（模拟 3 个 Worker 进程）
-    # 注意：每个 Worker 使用独立的 Redis 客户端 —— 与生产环境一致
-    # （同一客户端实例上的并发 BLPOP 可能被连接池串行化，导致任务全被一个消费者拿走）
+    # 每个 Worker 使用独立 Redis 客户端和唯一 consumer name，与生产环境一致。
     consumed_by: dict[str, str] = {}
 
     async def consumer(name: str):
@@ -97,9 +99,10 @@ async def main() -> None:
         worker_queue = RedisJobQueue(worker_redis, settings)
         try:
             while True:
-                job = await worker_queue.pop(timeout=0.2)
-                if job is None:
+                delivery = await worker_queue.pop(consumer_name=name, timeout=0.2)
+                if delivery is None:
                     return
+                job = delivery.job
                 consumed_by[job.job_id] = name
                 # 随机抖动模拟各 Worker 处理速度差异（让任务分发更真实可见）
                 await asyncio.sleep(random.uniform(0.01, 0.05))
@@ -116,7 +119,7 @@ async def main() -> None:
                 )
                 from app.queue.consumer import process_job
 
-                done = await process_job(worker_queue, lambda: rt, job)
+                done = await process_job(worker_queue, lambda: rt, delivery)
                 print(f"  [{name}] {job.job_id} -> {done.status.value}", flush=True)
         finally:
             await worker_redis.aclose()
@@ -156,10 +159,10 @@ async def main() -> None:
     from app.queue.consumer import process_job
 
     for i in range(settings.max_attempts):
-        popped = await queue.pop(timeout=0.2)
-        if popped is None:
+        delivery = await queue.pop(consumer_name="retry-demo", timeout=0.2)
+        if delivery is None:
             break
-        await process_job(queue, lambda: FailingRuntime(), popped)
+        await process_job(queue, lambda: FailingRuntime(), delivery)
         state = await queue.get_job(bad_job.job_id)
         print(f"  第 {i + 1} 次尝试 -> attempt={state.attempt} status={state.status.value}")
         if state.status == JobStatus.FAILED:

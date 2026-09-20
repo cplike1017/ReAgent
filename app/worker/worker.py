@@ -3,19 +3,20 @@ Worker：独立进程，从 Redis 队列消费 Job 并执行 Agent。
 
 执行模型：
     HTTP Gateway（FastAPI）
-        ↓ RPUSH
-    Redis List（agent:jobs:queue）
-        ↓ BLPOP
+        ↓ XADD
+    Redis Stream（agent:jobs:stream）
+        ↓ XREADGROUP / XAUTOCLAIM / XACK
     Worker（本模块）
         ↓
     Agent Runtime（Session / Checkpoint / Context Builder / Tools）
 
 启动多个 Worker（docker compose up --scale worker=3）时，
-Redis BLPOP 天然把请求分发给不同 Worker —— 并发能力由此而来。
+Consumer Group 把新消息分发给 Worker，PEL 保留未确认消息供超时接管。
 
 第六阶段会在取到 Job 后把 trace_context 注入 contextvars，继续同一 Trace。
 """
 import asyncio
+from contextlib import suppress
 import os
 import signal
 
@@ -79,7 +80,7 @@ async def run_worker(
     worker_id: str = "worker",
     queue: RedisJobQueue | None = None,
 ) -> None:
-    """Worker 主循环：BLPOP -> 处理 -> 循环。
+    """Worker 主循环：claim stale / read group -> 处理 -> ACK -> 循环。
 
     :param queue: 可注入的队列（测试用 fakeredis；缺省按 settings.redis_url 自建）
     """
@@ -95,16 +96,51 @@ async def run_worker(
         queue = RedisJobQueue(redis, settings, recorder=recorder)
     runtime_factory = build_runtime_factory(settings, recorder=recorder)
 
-    print(f"[{worker_id}] 启动，监听队列 {settings.queue_name}（max_attempts={settings.max_attempts}）", flush=True)
+    print(
+        f"[{worker_id}] 启动，监听 Stream {queue.stream_name} "
+        f"group={queue.consumer_group}（max_attempts={settings.max_attempts}）",
+        flush=True,
+    )
     try:
         while shutdown_event is None or not shutdown_event.is_set():
-            # BLPOP 阻塞 1 秒：既能及时取任务，又能定期检查退出信号
-            job = await queue.pop(timeout=1.0)
-            if job is None:
+            claimed = await queue.claim_stale(consumer_name=worker_id, count=1)
+            delivery = claimed[0] if claimed else None
+            if delivery is None and shutdown_event is None:
+                delivery = await queue.pop(
+                    timeout=settings.queue_read_block_ms / 1000,
+                    consumer_name=worker_id,
+                )
+            elif delivery is None:
+                pop_task = asyncio.create_task(
+                    queue.pop(
+                        timeout=settings.queue_read_block_ms / 1000,
+                        consumer_name=worker_id,
+                    )
+                )
+                stop_task = asyncio.create_task(shutdown_event.wait())
+                done, _ = await asyncio.wait(
+                    {pop_task, stop_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_task in done:
+                    pop_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await pop_task
+                    break
+                stop_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stop_task
+                delivery = pop_task.result()
+            if delivery is None:
                 continue
-            print(f"[{worker_id}] 消费 job={job.job_id} status={job.status.value} attempt={job.attempt}", flush=True)
+            job = delivery.job
+            print(
+                f"[{worker_id}] 消费 job={job.job_id} message={delivery.message_id} "
+                f"status={job.status.value} attempt={job.attempt}",
+                flush=True,
+            )
             try:
-                await process_job(queue, runtime_factory, job, recorder=recorder)
+                await process_job(queue, runtime_factory, delivery, recorder=recorder)
             except Exception as exc:  # process_job 已兜底，这里防御最后一层
                 print(f"[{worker_id}] job={job.job_id} 处理异常: {exc}", flush=True)
             done = await queue.get_job(job.job_id)

@@ -1,4 +1,5 @@
 """Job 数据模型。"""
+from dataclasses import dataclass
 from enum import Enum
 
 from pydantic import BaseModel, Field
@@ -31,3 +32,13 @@ class Job(BaseModel):
     result: dict | None = Field(default=None, description="成功结果，如 {'answer': ..., 'trace_id': ...}")
     error: dict | None = Field(default=None, description="失败的结构化错误 {type, message, code}")
     trace_context: dict = Field(default_factory=dict, description="Trace 传播上下文（Stage 6）")
+
+
+@dataclass(frozen=True)
+class StreamDelivery:
+    """Consumer Group 交付凭证；ACK 必须使用对应的 Stream message id。"""
+
+    message_id: str
+    job: Job
+    consumer_name: str
+    claimed: bool = False

@@ -213,8 +213,8 @@ async def test_trace_propagation_through_queue(settings, stub_llm, recorder):
     assert saved.trace_context["parent_span_id"] == root_span_id
 
     # 2) Worker 进程：消费并恢复 Trace 上下文
-    popped = await queue.pop(timeout=0.1)
-    done = await process_job(queue, lambda: rt, popped, recorder=recorder)
+    delivery = await queue.pop(consumer_name="trace-worker", timeout=0.1)
+    done = await process_job(queue, lambda: rt, delivery, recorder=recorder)
     assert done.status == JobStatus.SUCCEEDED
     assert done.result["trace_id"] == trace_id  # 结果里的 trace_id 与 Gateway 一致
 

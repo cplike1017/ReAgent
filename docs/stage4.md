@@ -20,16 +20,16 @@ Stage 4 引入**消息队列**解耦：
 Client
   ↓ POST /api/chat
 FastAPI Gateway（只接单：校验 + 幂等 + 入队，立即返回 job_id）
-  ↓ RPUSH
-Redis List（agent:jobs:queue）
-  ↓ BLPOP
-Worker × N（独立进程：取 Job → 执行 Agent → 写结果）
+  ↓ XADD
+Redis Stream（agent:jobs:stream）
+  ↓ XREADGROUP / XAUTOCLAIM / XACK
+Worker × N（Consumer Group：取 Job → 执行 Agent → 写结果并确认）
   ↓
 Agent Runtime
 ```
 
 - 为什么能提升并发？—— Gateway 只做毫秒级入队；真正的执行放到任意多个 Worker 上并行；
-  Redis BLPOP 天然把 Job 分发给不同 Worker。
+  Consumer Group 把新 Job 分发给不同 Worker，并把未确认消息保留在 PEL。
 - 为什么 Gateway 和 Worker 要拆开？—— 各自可以独立扩容、独立部署、独立故障；
   Worker 崩溃不阻塞 API，Job 还可以重试。
 
@@ -44,9 +44,9 @@ Stage 3 的 `runtime.run()` 仍是同步阻塞调用。文档虽然介绍了 `re
 | 组件 | 文件 | 职责 |
 |---|---|---|
 | Job 模型 | `app/queue/models.py` | `Job` / `JobStatus`（QUEUED/RUNNING/SUCCEEDED/FAILED） |
-| Redis 队列 | `app/queue/producer.py` | Redis List + Hash 自研队列：入队（幂等）/ 出队 / 状态更新 / 重入队 |
-| 消费者 | `app/queue/consumer.py` | `process_job`：RUNNING → 执行 → 成功 / 重试 / 失败 |
-| Worker | `app/worker/worker.py` | 独立进程主循环：BLPOP → 处理 → 循环（可优雅退出） |
+| Redis 队列 | `app/queue/producer.py` | Stream + Consumer Group + Job Hash：幂等入队、ACK、PEL 接管与原子重试 |
+| 消费者 | `app/queue/consumer.py` | `process_job`：RUNNING → heartbeat → 成功 ACK / 重试 / 失败 ACK |
+| Worker | `app/worker/worker.py` | 独立进程主循环：`XAUTOCLAIM` / `XREADGROUP` → 处理 → 循环 |
 | HTTP Gateway | `app/api/routes.py` | `POST /api/chat`、`GET /api/jobs/{id}`、`GET /health` |
 | 应用入口 | `app/main.py` | FastAPI + lifespan 连接 Redis |
 | Docker | `Dockerfile` / `docker-compose.yml` | api / redis / worker 三服务，支持 `--scale worker=N` |
@@ -57,15 +57,16 @@ Stage 3 的 `runtime.run()` 仍是同步阻塞调用。文档虽然介绍了 `re
 POST /api/chat {message, session_id?, idempotency_key?}
   → 生成 request_id / job_id
   → 幂等检查：request_id 已存在？返回已有 Job
-  → SET NX 占位 + 写 Job Hash + RPUSH 队列
+  → Redis 事务：写 request 映射 + Job Hash + XADD Stream
   → 返回 {request_id, job_id, session_id, status: "QUEUED"}
 
 Worker 循环：
-  → BLPOP 队列（阻塞 1s）
+  → 优先 XAUTOCLAIM 超时 Pending；否则 XREADGROUP 读取新消息
   → update_status(RUNNING)
+  → heartbeat 刷新 PEL idle，防止长任务被误接管
   → 加载 Session → AgentRuntime.run(message, session_id)
-  → update_status(SUCCEEDED, result={answer, trace_id})
-  → 异常：attempt+1 < max_attempts ? 重入队 : FAILED
+  → Redis 事务：保存 SUCCEEDED + XACK + XDEL
+  → 异常：attempt+1 < max_attempts ? 原子重试交接 : 保存 FAILED + XACK
 ```
 
 ## 核心数据结构
@@ -84,36 +85,32 @@ class Job(BaseModel):
     trace_context: dict        # Stage 6: {trace_id, parent_span_id}
 
 # Redis 键布局
-agent:jobs:queue            List   # 待消费 Job id 队列
+agent:jobs:stream           Stream # Consumer Group 工作队列
 agent:jobs:{job_id}         Hash   # Job 全量字段
-agent:requests:{request_id} String # 幂等占位（SET NX + TTL）
+agent:requests:{request_id} String # request -> job 幂等映射
 ```
 
 ## 关键代码
 
 ```python
-# 幂等入队（producer.py）：相同 request_id 绝不重复执行
-async def enqueue(self, job: Job) -> Job:
-    existing = await self._redis.get(self._request_key(job.request_id))
-    if existing is not None:
-        return await self.get_job(existing)          # 已有 -> 返回原 Job
-    acquired = await self._redis.set(
-        self._request_key(job.request_id), job.job_id, nx=True, ex=self.job_ttl
-    )
-    if not acquired:
-        return await self.get_job(await self._redis.get(...))  # 并发被抢占
-    await self.save_job(job)
-    await self._redis.rpush(self.queue_name, job.job_id)
-    return job
+# 入队事务（producer.py）
+WATCH agent:requests:{request_id}
+MULTI
+  SET agent:requests:{request_id} {job_id} EX {ttl}
+  HSET agent:jobs:{job_id} ...
+  XADD agent:jobs:stream * job_id {job_id}
+EXEC
 
-# 重试（consumer.py）：避免无限重试
-if fresh.attempt + 1 < queue.max_attempts:
-    fresh.attempt += 1
-    fresh.status = JobStatus.QUEUED
-    await queue.save_job(fresh)
-    await queue.requeue(fresh.job_id)
-else:
-    await queue.update_status(fresh.job_id, JobStatus.FAILED, error=error)
+# 成功事务
+HSET agent:jobs:{job_id} status SUCCEEDED ...
+XACK agent:jobs:stream agent-workers {message_id}
+XDEL agent:jobs:stream {message_id}
+
+# 重试事务
+HSET agent:jobs:{job_id} attempt {next_attempt} status QUEUED ...
+XADD agent:jobs:stream * job_id {job_id}
+XACK agent:jobs:stream agent-workers {old_message_id}
+XDEL agent:jobs:stream {old_message_id}
 ```
 
 ## 输入示例
@@ -159,29 +156,30 @@ python -m demos.stage4_demo
 pytest tests/test_queue_worker.py -v
 ```
 
-覆盖：入队/读取往返、BLPOP 出队、超时返回 None、幂等（同 request_id 不重复）、
-Worker 成功处理、状态流转、重试至上限后 FAILED、Worker 主循环端到端、
-3 个并发消费者处理 10 个 Job 无重复消费、HTTP API（入队/查询/幂等/404/健康检查）。
+覆盖：幂等 XADD、Consumer Group 分发、ACK、PEL、`XAUTOCLAIM`、heartbeat、
+终态重复 delivery 抑制、原子重试交接、Worker 成功处理与失败上限、
+并发消费者、Trace 传播和 HTTP API（入队/查询/幂等/404/健康检查）。
 
 ## 常见错误
 
 | 错误 | 原因 | 修复 |
 |---|---|---|
-| 幂等失效 | 忘了 SET NX，先查后写有竞态 | 用 `SET key val NX EX ttl` 原子占位 |
+| 幂等失效 | request 映射与 XADD 分两步，崩溃后状态不一致 | 用 WATCH/MULTI 原子写映射、Hash 与 Stream |
 | 无限重试 | 重试逻辑没有上限 | `attempt+1 < max_attempts` 才重入队 |
-| 工具重复执行 | 工具成功但回写前崩溃，重试导致再执行 | 幂等工具 / 记录已执行状态（教学点） |
-| BLPOP 阻塞无法退出 | 无限阻塞 | 用 1s 超时循环 + shutdown_event |
+| Pending 永久堆积 | Worker 崩溃后没人接管 PEL | 定期 `XAUTOCLAIM` 超时消息 |
+| 长任务被重复接管 | 处理时间超过 claim idle | heartbeat 必须短于 claim idle |
+| 外部副作用重复 | 工具成功但 Redis 终态提交前崩溃 | 工具端业务幂等键或事务 outbox/inbox |
 | 队列积压 | Worker 太少 / 处理太慢 | `--scale worker=N` |
 | 跨进程 SQLite 锁 | 多 Worker 同时写 | WAL 模式 + busy_timeout（已内置） |
 
 ## 面试如何表达
 
 > "Stage 4 我把执行从 API 进程剥离开：API 只做参数校验、生成 request_id/job_id、
-> 以 SET NX 实现幂等入队，然后立即返回；Worker 用 BLPOP 消费 Redis List，执行 Agent
-> 后写回状态。支持 max_attempts 重试且不会无限重试，`docker compose up --scale worker=3`
-> 就能水平扩展。这里我会强调两个工程点：一是幂等 —— request_id 相同绝不重复执行，
-> 二是重试语义 —— Worker 崩溃重试可能导致工具重复执行，这是分布式系统的经典问题，
-> 需要幂等工具或执行记录来兜底。"
+> 用 Redis 事务把 request 幂等映射、Job Hash 和 XADD 一起提交，然后立即返回；Worker
+> 通过 Consumer Group 消费，成功后保存终态并 ACK。崩溃任务留在 PEL，由其他 Worker
+> 在 idle 超时后 XAUTOCLAIM；活动任务用 heartbeat 防止误接管。重试交接同样在一个 Redis
+> 事务内完成。Redis Job 状态可以做到 effectively-once，但跨外部系统的副作用仍需工具端
+> 幂等键或 outbox/inbox，不能把 at-least-once 投递宣传成无条件 exactly-once。"
 
 ---
 

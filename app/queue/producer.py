@@ -1,24 +1,15 @@
-"""
-Redis Job 队列（Producer 侧 + 共享操作）。
+"""Redis Stream Job queue with consumer-group delivery and explicit ACK."""
 
-自行用 Redis List 实现队列（BLPOP/RPUSH），不引入 Celery / RQ，以看清机制：
-
-    - 队列本体：Redis List `agent:jobs:queue`
-    - Job 数据：Redis Hash `agent:jobs:{job_id}`（字段 = Job 模型）
-    - 幂等：Redis String `agent:requests:{request_id}`（SET NX + TTL）
-
-幂等（Idempotency）：
-    客户端重复提交相同 request_id 时，第二次入队直接返回第一次的 job，
-    绝不重复执行 —— 防止网络重试导致 Agent 重复运行。
-"""
+import asyncio
 import json
 from datetime import datetime, timezone
 
 from redis.asyncio import Redis
+from redis.exceptions import ResponseError, WatchError
 
 from app.config import Settings
 from app.errors import QueueError
-from app.queue.models import Job, JobStatus
+from app.queue.models import Job, JobStatus, StreamDelivery
 from app.tracing.recorder import TraceRecorder
 from app.tracing.span import trace_span
 
@@ -28,7 +19,7 @@ def utc_now() -> str:
 
 
 class RedisJobQueue:
-    """基于 Redis List + Hash 的最小任务队列。"""
+    """Redis Stream work queue backed by Job Hashes and a consumer group."""
 
     def __init__(
         self,
@@ -37,77 +28,80 @@ class RedisJobQueue:
         recorder: TraceRecorder | None = None,
     ) -> None:
         self._redis = redis
-        self.queue_name = settings.queue_name
+        self.stream_name = settings.queue_stream_name
+        self.consumer_group = settings.queue_consumer_group
+        self.claim_idle_ms = settings.queue_claim_idle_ms
+        self.heartbeat_ms = settings.queue_heartbeat_ms
+        self.read_block_ms = settings.queue_read_block_ms
+        if self.heartbeat_ms <= 0 or self.heartbeat_ms >= self.claim_idle_ms:
+            raise ValueError("queue heartbeat 必须大于 0 且小于 claim idle 时间")
         self.job_key_prefix = settings.job_key_prefix
         self.request_key_prefix = settings.request_key_prefix
         self.max_attempts = settings.max_attempts
         self.job_ttl = settings.job_ttl_seconds
-        self.recorder = recorder  # None = 不追踪
+        self.recorder = recorder
+        self._group_ready = False
+        self._group_lock = asyncio.Lock()
+        self._claim_cursors: dict[str, str] = {}
 
-    # ------------------------------------------------------------------
-    # 键名
-    # ------------------------------------------------------------------
     def _job_key(self, job_id: str) -> str:
         return f"{self.job_key_prefix}{job_id}"
 
     def _request_key(self, request_id: str) -> str:
         return f"{self.request_key_prefix}{request_id}"
 
-    # ------------------------------------------------------------------
-    # 序列化：Hash 字段是字符串，dict 字段需要 JSON 编码
-    # ------------------------------------------------------------------
     @staticmethod
     def _job_to_mapping(job: Job) -> dict:
-        d = job.model_dump(mode="json")
+        data = job.model_dump(mode="json")
         for key in ("input", "user", "result", "error", "trace_context"):
-            value = d.get(key)
-            d[key] = json.dumps(value, ensure_ascii=False) if value is not None else ""
-        return d
+            value = data.get(key)
+            data[key] = json.dumps(value, ensure_ascii=False) if value is not None else ""
+        return data
 
     @staticmethod
     def _job_from_mapping(raw: dict) -> Job:
-        d = dict(raw)
+        data = dict(raw)
         for key in ("input", "user", "result", "error", "trace_context"):
-            value = d.get(key)
+            value = data.get(key)
             if value in (None, ""):
-                d[key] = {} if key != "result" else None
+                data[key] = None if key in {"result", "error"} else {}
             else:
                 try:
-                    d[key] = json.loads(value)
+                    data[key] = json.loads(value)
                 except (TypeError, json.JSONDecodeError):
-                    d[key] = {} if key != "result" else None
-        return Job(**d)
+                    data[key] = None if key in {"result", "error"} else {}
+        return Job(**data)
 
-    # ------------------------------------------------------------------
-    # 写入 / 读取
-    # ------------------------------------------------------------------
+    async def ensure_consumer_group(self) -> None:
+        if self._group_ready:
+            return
+        async with self._group_lock:
+            if self._group_ready:
+                return
+            try:
+                await self._redis.xgroup_create(
+                    self.stream_name,
+                    self.consumer_group,
+                    id="0-0",
+                    mkstream=True,
+                )
+            except ResponseError as exc:
+                if "BUSYGROUP" not in str(exc):
+                    raise QueueError(f"创建 Redis Consumer Group 失败: {exc}") from exc
+            self._group_ready = True
+
     async def save_job(self, job: Job) -> Job:
-        """把 Job 完整写入 Hash 并设置 TTL。"""
         await self._redis.hset(self._job_key(job.job_id), mapping=self._job_to_mapping(job))
         await self._redis.expire(self._job_key(job.job_id), self.job_ttl)
         return job
 
     async def get_job(self, job_id: str) -> Job | None:
         raw = await self._redis.hgetall(self._job_key(job_id))
-        if not raw:
-            return None
-        return self._job_from_mapping(raw)
+        return self._job_from_mapping(raw) if raw else None
 
-    # ------------------------------------------------------------------
-    # Producer：入队（含幂等）
-    # ------------------------------------------------------------------
     async def enqueue(self, job: Job) -> Job:
-        """
-        入队一个 Job。
-
-        幂等流程：
-            1. request_id 已有记录 -> 直接返回已有 Job（不重复入队）；
-            2. SET NX 原子占位（防并发重复提交）；
-            3. 写入 Job Hash + RPUSH 到队列 List。
-        """
         if self.recorder is None or not self.recorder.enabled:
             return await self._enqueue_impl(job)
-
         async with trace_span(
             "redis.enqueue",
             "queue",
@@ -120,27 +114,29 @@ class RedisJobQueue:
             return enqueued
 
     async def _enqueue_impl(self, job: Job) -> Job:
-        existing = await self._redis.get(self._request_key(job.request_id))
-        if existing is not None:
-            return await self.get_job(existing)
+        request_key = self._request_key(job.request_id)
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(request_key)
+                    existing = await pipe.get(request_key)
+                    if existing is not None:
+                        found = await self.get_job(existing)
+                        if found is None:
+                            raise QueueError(f"幂等映射指向不存在的 Job: {existing}")
+                        return found
 
-        # SET NX：仅当键不存在时写入，返回 True 表示本进程抢占成功
-        acquired = await self._redis.set(
-            self._request_key(job.request_id), job.job_id, nx=True, ex=self.job_ttl
-        )
-        if not acquired:
-            # 并发下被其他进程抢占了：返回已有的 Job
-            winner = await self._redis.get(self._request_key(job.request_id))
-            return await self.get_job(winner)
+                    job.created_at = job.created_at or utc_now()
+                    pipe.multi()
+                    pipe.set(request_key, job.job_id, ex=self.job_ttl)
+                    pipe.hset(self._job_key(job.job_id), mapping=self._job_to_mapping(job))
+                    pipe.expire(self._job_key(job.job_id), self.job_ttl)
+                    pipe.xadd(self.stream_name, {"job_id": job.job_id})
+                    await pipe.execute()
+                    return job
+                except WatchError:
+                    continue
 
-        job.created_at = job.created_at or utc_now()
-        await self.save_job(job)
-        await self._redis.rpush(self.queue_name, job.job_id)
-        return job
-
-    # ------------------------------------------------------------------
-    # 状态更新
-    # ------------------------------------------------------------------
     async def update_status(
         self,
         job_id: str,
@@ -157,23 +153,221 @@ class RedisJobQueue:
             job.result = result
         if error is not None:
             job.error = error
-        await self.save_job(job)
-        return job
+        return await self.save_job(job)
 
-    # ------------------------------------------------------------------
-    # Consumer：出队 / 重试
-    # ------------------------------------------------------------------
-    async def pop(self, timeout: float = 0) -> Job | None:
-        """BLPOP 阻塞弹出队头 Job；超时返回 None。"""
-        item = await self._redis.blpop(self.queue_name, timeout=timeout)
-        if item is None:
+    async def start(self, delivery: StreamDelivery) -> tuple[Job, bool]:
+        """Start the delivered attempt unless it is terminal, stale, or duplicated."""
+        job_key = self._job_key(delivery.job.job_id)
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(job_key)
+                    raw = await pipe.hgetall(job_key)
+                    if not raw:
+                        raise QueueError(f"Job 不存在: {delivery.job.job_id}")
+                    current = self._job_from_mapping(raw)
+                    terminal = current.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}
+                    stale_attempt = current.attempt != delivery.job.attempt
+                    duplicate_running = (
+                        current.status == JobStatus.RUNNING and not delivery.claimed
+                    )
+                    if terminal or stale_attempt or duplicate_running:
+                        pipe.multi()
+                        pipe.xack(
+                            self.stream_name,
+                            self.consumer_group,
+                            delivery.message_id,
+                        )
+                        pipe.xdel(self.stream_name, delivery.message_id)
+                        await pipe.execute()
+                        return current, False
+
+                    current.status = JobStatus.RUNNING
+                    pipe.multi()
+                    pipe.hset(job_key, mapping=self._job_to_mapping(current))
+                    pipe.expire(job_key, self.job_ttl)
+                    await pipe.execute()
+                    return current, True
+                except WatchError:
+                    continue
+
+    async def pop(
+        self,
+        timeout: float = 0,
+        *,
+        consumer_name: str = "worker",
+    ) -> StreamDelivery | None:
+        await self.ensure_consumer_group()
+        block_ms = None if timeout <= 0 else max(1, int(timeout * 1000))
+        rows = await self._redis.xreadgroup(
+            self.consumer_group,
+            consumer_name,
+            {self.stream_name: ">"},
+            count=1,
+            block=block_ms,
+        )
+        if not rows:
             return None
-        job_id = item[1]
-        return await self.get_job(job_id)
+        message_id, fields = rows[0][1][0]
+        return await self._delivery_from_message(
+            message_id,
+            fields,
+            consumer_name=consumer_name,
+            claimed=False,
+        )
 
-    async def requeue(self, job_id: str) -> None:
-        """重新入队（重试）。"""
-        await self._redis.rpush(self.queue_name, job_id)
+    async def _delivery_from_message(
+        self,
+        message_id: str,
+        fields: dict,
+        *,
+        consumer_name: str,
+        claimed: bool,
+    ) -> StreamDelivery | None:
+        job_id = fields.get("job_id")
+        job = await self.get_job(job_id) if job_id else None
+        delivery = (
+            StreamDelivery(message_id, job, consumer_name, claimed)
+            if job is not None
+            else None
+        )
+        if delivery is None or job.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+            await self._ack_message(message_id)
+            return None
+        return delivery
+
+    async def claim_stale(
+        self,
+        *,
+        consumer_name: str,
+        min_idle_ms: int | None = None,
+        count: int = 1,
+    ) -> list[StreamDelivery]:
+        await self.ensure_consumer_group()
+        response = await self._redis.xautoclaim(
+            self.stream_name,
+            self.consumer_group,
+            consumer_name,
+            self.claim_idle_ms if min_idle_ms is None else min_idle_ms,
+            start_id=self._claim_cursors.get(consumer_name, "0-0"),
+            count=count,
+        )
+        self._claim_cursors[consumer_name] = response[0]
+        messages = response[1] if len(response) > 1 else []
+        deliveries: list[StreamDelivery] = []
+        for message_id, fields in messages:
+            delivery = await self._delivery_from_message(
+                message_id,
+                fields,
+                consumer_name=consumer_name,
+                claimed=True,
+            )
+            if delivery is not None:
+                deliveries.append(delivery)
+        return deliveries
+
+    async def _ack_message(self, message_id: str) -> int:
+        async with self._redis.pipeline(transaction=True) as pipe:
+            pipe.xack(self.stream_name, self.consumer_group, message_id)
+            pipe.xdel(self.stream_name, message_id)
+            acknowledged, _ = await pipe.execute()
+        return int(acknowledged)
+
+    async def ack(self, delivery: StreamDelivery) -> int:
+        return await self._ack_message(delivery.message_id)
+
+    async def touch(self, delivery: StreamDelivery) -> bool:
+        """Refresh a live delivery's PEL idle clock without changing its owner."""
+        ids = await self._redis.xclaim(
+            self.stream_name,
+            self.consumer_group,
+            delivery.consumer_name,
+            min_idle_time=0,
+            message_ids=[delivery.message_id],
+            justid=True,
+        )
+        return delivery.message_id in ids
+
+    async def finish(
+        self,
+        delivery: StreamDelivery,
+        *,
+        status: JobStatus,
+        result: dict | None = None,
+        error: dict | None = None,
+    ) -> Job:
+        if status not in {JobStatus.SUCCEEDED, JobStatus.FAILED}:
+            raise QueueError(f"finish 只接受终态，收到: {status.value}")
+        job_key = self._job_key(delivery.job.job_id)
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(job_key)
+                    raw = await pipe.hgetall(job_key)
+                    if not raw:
+                        raise QueueError(f"Job 不存在: {delivery.job.job_id}")
+                    job = self._job_from_mapping(raw)
+                    already_terminal = job.status in {
+                        JobStatus.SUCCEEDED,
+                        JobStatus.FAILED,
+                    }
+                    stale_attempt = job.attempt != delivery.job.attempt
+                    if not already_terminal and not stale_attempt:
+                        job.status = status
+                        job.result = result
+                        job.error = error
+
+                    pipe.multi()
+                    if not already_terminal and not stale_attempt:
+                        pipe.hset(job_key, mapping=self._job_to_mapping(job))
+                        pipe.expire(job_key, self.job_ttl)
+                    pipe.xack(
+                        self.stream_name,
+                        self.consumer_group,
+                        delivery.message_id,
+                    )
+                    pipe.xdel(self.stream_name, delivery.message_id)
+                    await pipe.execute()
+                    return job
+                except WatchError:
+                    continue
+
+    async def retry(self, delivery: StreamDelivery, job: Job) -> Job:
+        """Atomically replace a failed delivery with its next-attempt message."""
+        if job.status != JobStatus.QUEUED:
+            raise QueueError(f"retry 只接受 QUEUED Job，收到: {job.status.value}")
+        job_key = self._job_key(job.job_id)
+        while True:
+            async with self._redis.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(job_key)
+                    raw = await pipe.hgetall(job_key)
+                    if not raw:
+                        raise QueueError(f"Job 不存在: {job.job_id}")
+                    current = self._job_from_mapping(raw)
+                    terminal = current.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}
+                    stale_attempt = current.attempt != job.attempt - 1
+
+                    pipe.multi()
+                    if not terminal and not stale_attempt:
+                        pipe.hset(job_key, mapping=self._job_to_mapping(job))
+                        pipe.expire(job_key, self.job_ttl)
+                        pipe.xadd(self.stream_name, {"job_id": job.job_id})
+                    pipe.xack(
+                        self.stream_name,
+                        self.consumer_group,
+                        delivery.message_id,
+                    )
+                    pipe.xdel(self.stream_name, delivery.message_id)
+                    await pipe.execute()
+                    return current if terminal or stale_attempt else job
+                except WatchError:
+                    continue
+
+    async def pending_count(self) -> int:
+        await self.ensure_consumer_group()
+        summary = await self._redis.xpending(self.stream_name, self.consumer_group)
+        return int(summary.get("pending", 0))
 
     async def queue_length(self) -> int:
-        return await self._redis.llen(self.queue_name)
+        return int(await self._redis.xlen(self.stream_name))

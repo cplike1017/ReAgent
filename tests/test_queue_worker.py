@@ -54,14 +54,16 @@ async def test_enqueue_and_roundtrip(queue):
 
 async def test_pop_consumes_job(queue):
     await queue.enqueue(_make_job("req_2", "你好"))
-    popped = await queue.pop(timeout=0.1)
-    assert popped is not None
-    assert popped.request_id == "req_2"
+    delivery = await queue.pop(consumer_name="test-worker", timeout=0.1)
+    assert delivery is not None
+    assert delivery.job.request_id == "req_2"
+    assert await queue.pending_count() == 1
+    await queue.ack(delivery)
     assert await queue.queue_length() == 0
 
 
 async def test_pop_timeout_returns_none(queue):
-    assert await queue.pop(timeout=0.01) is None
+    assert await queue.pop(consumer_name="test-worker", timeout=0.01) is None
 
 
 # ---------------------------------------------------------------------------
@@ -111,17 +113,20 @@ def test_worker_runtime_omits_delegate_when_orchestration_is_disabled(settings):
 
 
 async def test_process_job_success(queue, runtime):
-    job = await queue.enqueue(_make_job("req_ok", "查询北京天气", session_id="session_ok"))
-    done = await process_job(queue, lambda: runtime, job)
+    await queue.enqueue(_make_job("req_ok", "查询北京天气", session_id="session_ok"))
+    delivery = await queue.pop(consumer_name="test-worker", timeout=0.1)
+    done = await process_job(queue, lambda: runtime, delivery)
     assert done.status == JobStatus.SUCCEEDED
     assert "北京" in done.result["answer"]
     assert done.result["session_id"] == "session_ok"
+    assert await queue.pending_count() == 0
 
 
 async def test_process_job_status_transitions(queue, runtime):
     job = await queue.enqueue(_make_job("req_trans", "查询北京天气"))
     assert job.status == JobStatus.QUEUED
-    await process_job(queue, lambda: runtime, job)
+    delivery = await queue.pop(consumer_name="test-worker", timeout=0.1)
+    await process_job(queue, lambda: runtime, delivery)
     # 中间态 RUNNING 已被覆盖为 SUCCEEDED，但可通过日志/钩子观察；这里验证终态
     final = await queue.get_job(job.job_id)
     assert final.status == JobStatus.SUCCEEDED
@@ -139,13 +144,15 @@ async def test_retry_until_max_attempts(queue):
     job = await queue.enqueue(_make_job("req_fail", "你好"))
 
     for expected_attempt in (0, 1, 2):
-        popped = await queue.pop(timeout=0.1)
-        assert popped is not None
-        await process_job(queue, lambda: FailingRuntime(), popped)
+        delivery = await queue.pop(consumer_name="test-worker", timeout=0.1)
+        assert delivery is not None
+        await process_job(queue, lambda: FailingRuntime(), delivery)
         state = await queue.get_job(job.job_id)
         if expected_attempt < 2:
             assert state.status == JobStatus.QUEUED  # 已重新入队
             assert state.attempt == expected_attempt + 1
+            assert await queue.pending_count() == 0
+            assert await queue.queue_length() == 1
         else:
             assert state.status == JobStatus.FAILED  # 用尽重试
             assert state.error["type"] == "RuntimeError"
@@ -173,7 +180,26 @@ async def test_worker_loop_processes_jobs(queue, runtime, settings):
             assert final is not None and final.status == JobStatus.SUCCEEDED
     finally:
         shutdown.set()
-        await worker_task
+        await asyncio.wait_for(worker_task, timeout=2)
+
+
+async def test_idle_worker_honors_shutdown_event(queue, settings):
+    """空队列的有限 Stream 阻塞结束后，Worker 应及时响应退出信号。"""
+    shutdown = asyncio.Event()
+    bounded = settings.model_copy(update={"queue_read_block_ms": 10})
+    worker_task = asyncio.create_task(
+        run_worker(
+            settings=bounded,
+            shutdown_event=shutdown,
+            worker_id="idle-worker",
+            queue=queue,
+        )
+    )
+
+    await asyncio.sleep(0.02)
+    shutdown.set()
+
+    await asyncio.wait_for(worker_task, timeout=0.5)
 
 
 async def test_concurrent_consumers(queue, runtime):
@@ -184,11 +210,11 @@ async def test_concurrent_consumers(queue, runtime):
     async def consumer(name: str):
         processed = []
         while True:
-            job = await queue.pop(timeout=0.1)
-            if job is None:
+            delivery = await queue.pop(consumer_name=name, timeout=0.1)
+            if delivery is None:
                 break
-            await process_job(queue, lambda: runtime, job)
-            processed.append(job.job_id)
+            await process_job(queue, lambda: runtime, delivery)
+            processed.append(delivery.job.job_id)
         return processed
 
     results = await asyncio.gather(*(consumer(f"w{i}") for i in range(3)))

@@ -198,15 +198,17 @@ curl http://127.0.0.1:8000/api/web/agents
 
 ### Redis 异步队列的数据模型
 
-`POST /api/chat` 使用 Redis **List**，不是 Redis Stream：生产端将 `job_id` 写入 `agent:jobs:queue`（`RPUSH`），Worker 通过 `BLPOP` 阻塞取出任务。相关键分别保存不同职责的数据：
+`POST /api/chat` 使用 Redis **Stream Consumer Group**：生产端通过 `XADD` 将 `job_id` 写入 `agent:jobs:stream`，Worker 使用 `XREADGROUP` 消费，并在 Job 进入终态后 `XACK`。未确认消息保留在 PEL 中，超过 idle 阈值后可由其他 Worker 通过 `XAUTOCLAIM` 接管；活动 Worker 会发送 heartbeat 刷新 PEL idle，避免长任务被误接管。
 
 | 键 | Redis 类型 | 用途 |
 | --- | --- | --- |
-| `agent:jobs:queue` | List | 待处理的 `job_id` 队列。 |
+| `agent:jobs:stream` | Stream | 待处理的 `job_id`，由 `agent-workers` Consumer Group 分发。 |
 | `agent:jobs:{job_id}` | Hash | Job 的输入、状态、结果、错误和 Trace 上下文。 |
-| `agent:requests:{request_id}` | String | `SET NX` 幂等键，防止相同请求重复入队。 |
+| `agent:requests:{request_id}` | String | 请求到 Job 的幂等映射，防止相同请求重复 `XADD`。 |
 
-因此，当前队列不使用 `XADD`、`XREADGROUP` 或消费者组；Redis Stream 也没有用于异步任务分发。
+成功或终态失败会在同一 Redis 事务中保存 Job、ACK 并删除已完成的队列条目；重试也会原子完成“保存下一 attempt、追加新消息、ACK/删除旧消息”。Job Hash 使用乐观锁保护 attempt 和终态，首次终态提交获胜，重复 retry 不会产生额外消息；终态 Job 的重复 delivery 会直接 ACK，不再调用 Agent。
+
+该实现提供 Redis Job 状态层面的 effectively-once 处理，但 Redis Stream 的投递基础仍是 at-least-once。若 Agent 调用的外部系统产生副作用，严格 exactly-once 还需要外部工具接受业务幂等键，或采用事务 outbox/inbox。完整设计与上线步骤见 [Redis Stream 任务队列替换执行计划](docs/redis-stream-queue-migration-plan.md)。
 
 ## 项目结构
 
@@ -271,6 +273,7 @@ python -m evals.runner --compare evals/runs/<baseline>.json
 - [阶段 12：多 Agent 编排](docs/stage12.md)
 - [前端审查与实施计划](docs/frontend-audit-plan.md)
 - [Agent 工作台与执行透明化指南](docs/agent-workbench-guide.md)
+- [Redis Stream 任务队列替换执行计划](docs/redis-stream-queue-migration-plan.md)
 - [UI 与底层改进记录](docs/ui-runtime-improvements-2026-09-12.md)
 - [MARL 科研助手演进规划（尚未实施）](docs/marl-research-assistant-roadmap.md)
 - [演示录制指南](docs/demo-guide.md)
