@@ -14,6 +14,7 @@ ReAgent 使用 OpenAI-compatible 接口接入模型；没有配置模型密钥�
 | 多 Agent 编排 | 基于档案的分工、依赖图调度、并行执行、嵌套深度限制和结果持久化。 |
 | MCP 与 Skill | 接入 stdio / SSE MCP Server；按触发条件加载可复用 Skill。 |
 | 可观测性 | JSONL Trace、调用树、评测与回归结果。 |
+| 科研基础 API（可选） | 项目、论文版本、SHA-256 资料快照、页内证据定位、待核验主张与 Markdown 报告；首个离线样例围绕 PPO 单智能体复现。 |
 | Web UI | 执行工作台以 SSE 实时展示决策、工具状态、Trace 与并行编排；执行事件可持久化、回放和取消，支持会话主题/预览、四套配色、明暗模式、可调节面板与移动端布局。 |
 
 ## 快速开始
@@ -88,6 +89,20 @@ EMBEDDING_MODEL=your-embedding-model
 完整的可选配置（MCP、天气、SMTP、工具策略、Trace 等）见 [.env.example](.env.example)。
 
 也可以在 Web UI 的 **Settings** 中修改聊天模型、Embedding、Tavily / GitHub 密钥和多 Agent 编排参数。密钥输入为只写字段，读取接口只返回“是否已配置”；保存值写入 `RUNTIME_CONFIG_FILE`，重启 API 与 Worker 后生效。
+
+### 4. 试用科研基础功能（可选）
+
+按照 [RL 科研助手改进计划](docs/rl-research-assistant-improvement-plan.md)，已落地 M0/R01 的首个数据与证据闭环。先运行无网络、无模型调用的 PPO 样例：
+
+```bash
+python -m demos.research_foundation_demo --output data/research-demo
+```
+
+输出包含 `report.md`、SQLite 数据库、来源文件、资料快照与校验清单。重复运行请更换输出目录。查看 [示例报告](docs/examples/ppo-research-foundation-report.md)。
+
+使用 API 时，在 `.env` 设置 `RESEARCH_ENABLED=true` 后重启 API；入口为 `/api/research/projects`，Swagger 文档在 `/docs`。科研 API 无需 Redis，当前面向本地单用户，尚未接入聊天工具或科研 UI。
+
+当前验证的是资料归档和摘录定位；报告中的主张保持 `unverified`。PPO 训练、实验协议管理、多 seed 统计和自主科研工作流将在后续阶段实现。配置、请求示例、备份与限制见 [科研基础使用说明](docs/rl-research-foundation.md)。
 
 ## 架构
 

@@ -106,7 +106,14 @@ async def test_terminal_duplicate_is_acknowledged_without_becoming_work(stream_q
         result={"answer": "done"},
     )
 
-    await stream_queue._redis.xadd(stream_queue.stream_name, {"job_id": job.job_id})
+    # fakeredis may reuse the last ID when an empty Stream is refilled in the
+    # same millisecond. Inject a strictly newer ID to model a real redelivery.
+    milliseconds, sequence = delivery.message_id.split("-")
+    await stream_queue._redis.xadd(
+        stream_queue.stream_name,
+        {"job_id": job.job_id},
+        id=f"{milliseconds}-{int(sequence) + 1}",
+    )
     duplicate = await stream_queue.pop(consumer_name="worker-b", timeout=0.1)
 
     assert duplicate is None
