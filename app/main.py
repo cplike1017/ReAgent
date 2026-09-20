@@ -29,21 +29,30 @@ from app.config import Settings, get_settings, load_runtime_settings
 from app.llm.client import create_llm_client
 from app.mcp.client import MCPClientManager
 from app.memory.store import MemoryStore
+from app.memory.embedding import create_embedding_client
 from app.queue.producer import RedisJobQueue
 from app.research.artifacts import ArtifactStore
 from app.research.errors import ResearchError
+from app.research.literature import ArxivClient
 from app.research.repository import SQLiteResearchRepository
 from app.research.service import ResearchService
+from app.research.tools import register_research_tools
 from app.session.repository import SQLiteSessionRepository
 from app.skills.manager import SkillManager
 from app.tools.builtin import build_default_registry
 from app.tracing.recorder import TraceRecorder
 
 
-def build_web_runtime(settings: Settings, recorder: TraceRecorder) -> AgentRuntime:
+def build_web_runtime(settings: Settings, recorder: TraceRecorder,
+                      research_service: ResearchService | None = None,
+                      tool_allowlist: set[str] | frozenset[str] | None = None) -> AgentRuntime:
     """构建 Web 进程内运行时：AgentRuntime + 记忆 + MCP + 技能 + 多 Agent 编排。"""
     llm = create_llm_client(settings)
     registry = build_default_registry()
+    if research_service is not None:
+        register_research_tools(registry, research_service)
+    if tool_allowlist is not None:
+        registry = registry.subset(tool_allowlist)
     session_repo = SQLiteSessionRepository(settings.database_url)
     checkpoint_repo = SQLiteCheckpointRepository(settings.database_url)
 
@@ -113,8 +122,21 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         app.state.queue = RedisJobQueue(client, settings, recorder=recorder)
         app.state.recorder = recorder
         app.state.settings = settings
+        research_repository = None
+        research_embedding = None
+        app.state.research_service = None
+        if settings.research_enabled:
+            research_repository = SQLiteResearchRepository(settings.database_url)
+            research_embedding = create_embedding_client(settings)
+            app.state.research_service = ResearchService(
+                research_repository,
+                ArtifactStore(settings.research_artifact_dir, settings.sandbox_dir,
+                              settings.research_max_artifact_bytes),
+                ArxivClient(settings),
+                research_embedding,
+            )
         # 3) Web 进程内运行时（记忆 + MCP + 技能）
-        app.state.runtime = build_web_runtime(settings, recorder)
+        app.state.runtime = build_web_runtime(settings, recorder, app.state.research_service)
 
         # 4) 执行事件存储：页面刷新后仍可回放已发生的 Agent 生命周期。
         execution_repository = SQLiteExecutionRepository(
@@ -128,16 +150,6 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         app.state.web_runtime_lock = asyncio.Lock()
         # 直连 Web 运行任务按 execution_id 保存，供断线续接和显式取消使用。
         app.state.web_execution_tasks = {}
-
-        research_repository = None
-        app.state.research_service = None
-        if settings.research_enabled:
-            research_repository = SQLiteResearchRepository(settings.database_url)
-            app.state.research_service = ResearchService(
-                research_repository,
-                ArtifactStore(settings.research_artifact_dir, settings.sandbox_dir,
-                              settings.research_max_artifact_bytes),
-            )
 
         # 5) 后台预初始化 MCP（不阻塞 Web 启动；工具在后台陆续注册）
         mcp_task = None
@@ -184,6 +196,10 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
         if app.state.runtime.memory is not None:
             app.state.runtime.memory.close()
         execution_repository.close()
+        if research_embedding is not None:
+            close_embedding = getattr(research_embedding, "aclose", None)
+            if close_embedding is not None:
+                await close_embedding()
         if research_repository is not None:
             research_repository.close()
         await client.aclose()

@@ -14,7 +14,7 @@ ReAgent 使用 OpenAI-compatible 接口接入模型；没有配置模型密钥�
 | 多 Agent 编排 | 基于档案的分工、依赖图调度、并行执行、嵌套深度限制和结果持久化。 |
 | MCP 与 Skill | 接入 stdio / SSE MCP Server；按触发条件加载可复用 Skill。 |
 | 可观测性 | JSONL Trace、调用树、评测与回归结果。 |
-| 科研基础 API（可选） | 项目、论文版本、SHA-256 资料快照、页内证据定位、待核验主张与 Markdown 报告；首个离线样例围绕 PPO 单智能体复现。 |
+| 科研基础与聊天工具（可选） | 与算法无关的项目、论文版本、SHA-256 资料快照、页内证据定位、待核验主张与 Markdown 报告；Web Agent 可通过工具读写同一批科研记录。 |
 | Web UI | 执行工作台以 SSE 实时展示决策、工具状态、Trace 与并行编排；执行事件可持久化、回放和取消，支持会话主题/预览、四套配色、明暗模式、可调节面板与移动端布局。 |
 
 ## 快速开始
@@ -92,7 +92,9 @@ EMBEDDING_MODEL=your-embedding-model
 
 ### 4. 试用科研基础功能（可选）
 
-按照 [RL 科研助手改进计划](docs/rl-research-assistant-improvement-plan.md)，已落地 M0/R01 的首个数据与证据闭环。先运行无网络、无模型调用的 PPO 样例：
+ReAgent 的方向是保留通用 Agent 能力，并增加可复用的强化学习科研工具与工作流；研究问题、算法和环境由用户任务决定。按照 [RL 科研助手改进计划](docs/rl-research-assistant-improvement-plan.md)，目前已落地 M0/R01 的通用数据与证据基础，以及 M1 的 Web Agent 工具接入切片；完整自主科研工作流仍在后续阶段。
+
+以下 PPO 离线样例只用于演示和验收上述基础能力，不限定产品支持范围：
 
 ```bash
 python -m demos.research_foundation_demo --output data/research-demo
@@ -100,9 +102,13 @@ python -m demos.research_foundation_demo --output data/research-demo
 
 输出包含 `report.md`、SQLite 数据库、来源文件、资料快照与校验清单。重复运行请更换输出目录。查看 [示例报告](docs/examples/ppo-research-foundation-report.md)。
 
-使用 API 时，在 `.env` 设置 `RESEARCH_ENABLED=true` 后重启 API；入口为 `/api/research/projects`，Swagger 文档在 `/docs`。科研 API 无需 Redis，当前面向本地单用户，尚未接入聊天工具或科研 UI。
+在 `.env` 设置 `RESEARCH_ENABLED=true` 后重启 API；入口为 `/api/research/projects`，Swagger 文档在 `/docs`。同一开关为 Web 聊天注册 16 个 `research_*` 工具，共享项目、查询与证据数据。`GET /api/research/literature/arxiv/search` 返回明确版本、摘要、日期和分类；摘要与受限 PDF 全文分别通过 `/papers/import/arxiv` 和 `/papers/import/arxiv/full-text` 导入。`POST /projects/{project_id}/search` 在项目已保存记录内组合词法与 embedding 排序，并把查询历史持久化；embedding 失败会明确降级，不影响词法结果。科研 API 和 Web 直连工具无需 Redis，当前面向本地单用户；尚无专用科研 UI，Redis Worker 尚未接入这组工具。
 
-当前验证的是资料归档和摘录定位；报告中的主张保持 `unverified`。PPO 训练、实验协议管理、多 seed 统计和自主科研工作流将在后续阶段实现。配置、请求示例、备份与限制见 [科研基础使用说明](docs/rl-research-foundation.md)。
+当前验证的是资料归档、结构化 arXiv 元数据、摘要/受控 PDF 快照、页级摘录定位和 Agent 工具链路；报告中的主张保持 `unverified`。运行 `python -m demos.research_tools_demo --output data/research-tools-demo` 可生成非 PPO 主题的离线对话、报告和 Trace；该样例使用脚本模型与合成资料，不是模型自主科研评测。保存 PDF 只证明全文文件已归档；只有 `research_read_page` 返回过的页才进入读取覆盖，系统不做 OCR，也不声称自动读完或核验全文。通用实验协议管理、多 seed 统计和训练后端适配将在后续阶段实现。配置、请求示例、备份与限制见 [科研基础使用说明](docs/rl-research-foundation.md)。
+
+固定证据工程门槛可用 `python -m evals.research_evidence_acceptance --output evals/runs/research-evidence-v1` 运行。它生成 10 份明确标注为 synthetic 的资料、30 条逐字定位的 Claim、SQLite、Artifact、报告和 manifest，并验证重复导入、哈希、定位重开及 `unverified` 状态；全程不调用模型或训练。该数据集只验证工程契约，不评估真实论文语义或模型科研能力。
+
+真实供应商验收可用 `python -m evals.research_model_acceptance --output evals/runs/research-model-dqn-v1` 运行。脚本拒绝 Stub，固定导入公开的 `1312.5602v1` DQN PDF，并要求模型实际调用页读取、证据保存、Claim 关联和报告导出；输出目录不可覆盖，失败也保留 SQLite、PDF、脱敏 Trace、报告和 manifest，并以非零状态退出。运行前须保证 `LLM_API_KEY` 对当前 `LLM_BASE_URL` 有效；该任务不执行训练，保存的 Claim 始终为 `unverified`。
 
 ## 架构
 

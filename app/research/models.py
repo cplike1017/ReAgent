@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 Identifier = Annotated[str, Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")]
 ShortText = Annotated[str, Field(min_length=1, max_length=500)]
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+VersionedArxivId = Annotated[
+    str, Field(pattern=r"^(?:\d{4}\.\d{4,5}|[a-zA-Z.-]+/\d{7})v[1-9]\d*$")
+]
 
 
 class ResearchModel(BaseModel):
@@ -47,6 +50,9 @@ class PaperImport(ResearchModel):
     authors: list[ShortText] = Field(default_factory=list, max_length=100)
     source_url: HttpUrl | None = None
     published_at: str = Field(default="", max_length=100)
+    updated_at: str = Field(default="", max_length=100)
+    categories: list[ShortText] = Field(default_factory=list, max_length=100)
+    primary_category: str = Field(default="", max_length=100)
     artifact_id: Identifier | None = None
     content_scope: Literal["abstract", "full_text", "notes"] | None = None
 
@@ -76,8 +82,31 @@ class PaperVersion(PaperImport):
     paper_id: Identifier
     paper_version_id: Identifier
     created_at: str
+    # The active artifact remains backward compatible. These explicit material
+    # references preserve an abstract snapshot when a validated PDF is promoted.
+    abstract_artifact_id: Identifier | None = None
+    full_text_artifact_id: Identifier | None = None
     read_scope: Literal["metadata", "selected_pages"] = "metadata"
     read_pages: list[int] = Field(default_factory=list)
+
+
+class ArxivImport(ResearchModel):
+    arxiv_id: VersionedArxivId
+
+
+class ArxivPaper(ResearchModel):
+    arxiv_id: VersionedArxivId
+    source_id: ShortText
+    version: str = Field(pattern=r"^v[1-9]\d*$")
+    title: ShortText
+    authors: list[ShortText] = Field(default_factory=list, max_length=100)
+    abstract: str = Field(min_length=1, max_length=50000)
+    published_at: str = Field(default="", max_length=100)
+    updated_at: str = Field(default="", max_length=100)
+    categories: list[ShortText] = Field(default_factory=list, max_length=100)
+    primary_category: str = Field(default="", max_length=100)
+    source_url: HttpUrl
+    pdf_url: HttpUrl
 
 
 class EvidenceCreate(ResearchModel):
@@ -123,3 +152,49 @@ class Claim(ClaimCreate):
     project_id: Identifier
     verification_status: Literal["unverified"] = "unverified"
     created_at: str
+
+
+SearchResource = Literal["papers", "evidence", "claims"]
+
+
+class ResearchSearchRequest(ResearchModel):
+    query: str = Field(min_length=1, max_length=500)
+    resources: list[SearchResource] = Field(
+        default_factory=lambda: ["papers", "evidence", "claims"], min_length=1, max_length=3,
+    )
+    semantic: bool = True
+    limit: int = Field(default=10, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def unique_resources(self):
+        if len(self.resources) != len(set(self.resources)):
+            raise ValueError("检索资源不能重复")
+        return self
+
+
+class ResearchSearchHit(ResearchModel):
+    project_id: Identifier
+    resource: SearchResource
+    record_id: Identifier
+    paper_version_id: Identifier | None = None
+    title: str = Field(default="", max_length=500)
+    snippet: str = Field(min_length=1, max_length=1000)
+    score: float = Field(ge=0.0, le=1.0)
+    lexical_score: float = Field(ge=0.0, le=1.0)
+    semantic_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class ResearchQueryRecord(ResearchSearchRequest):
+    query_id: Identifier
+    project_id: Identifier
+    mode: Literal["hybrid", "lexical", "lexical_fallback"]
+    semantic_available: bool
+    result_refs: list[str] = Field(default_factory=list, max_length=50)
+    created_at: str
+
+
+class ResearchSearchResult(ResearchModel):
+    query_id: Identifier
+    mode: Literal["hybrid", "lexical", "lexical_fallback"]
+    semantic_available: bool
+    items: list[ResearchSearchHit] = Field(default_factory=list, max_length=50)

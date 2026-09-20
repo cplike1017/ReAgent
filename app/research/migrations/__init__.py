@@ -48,6 +48,22 @@ MIGRATIONS = [
             FOREIGN KEY(project_id, claim_id) REFERENCES research_claims(project_id, claim_id),
             FOREIGN KEY(project_id, evidence_id) REFERENCES research_evidence(project_id, evidence_id))""",
     )),
+    (2, (
+        """CREATE TABLE research_queries (
+            query_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES research_projects(project_id),
+            created_at TEXT NOT NULL, data_json TEXT NOT NULL,
+            UNIQUE(project_id, query_id))""",
+        """CREATE TABLE research_search_embeddings (
+            project_id TEXT NOT NULL REFERENCES research_projects(project_id),
+            resource TEXT NOT NULL CHECK(resource IN ('papers','evidence','claims')),
+            record_id TEXT NOT NULL, model TEXT NOT NULL,
+            text_sha256 TEXT NOT NULL, vector_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, resource, record_id, model))""",
+        """CREATE INDEX research_queries_project_created
+            ON research_queries(project_id, created_at, query_id)""",
+    )),
 ]
 
 

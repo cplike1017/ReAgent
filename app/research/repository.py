@@ -1,4 +1,5 @@
 """SQLite research records; transactions preserve project-scoped references."""
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -9,7 +10,7 @@ from app.research.errors import ResearchConflict, ResearchNotFound
 from app.research.migrations import apply_migrations
 from app.research.models import (
     Artifact, Claim, ClaimCreate, EvidenceSpan, PaperImport, PaperVersion,
-    ProjectCreate, ResearchProject,
+    ProjectCreate, ResearchProject, ResearchQueryRecord,
 )
 from app.session.repository import sqlite_path_from_url, utc_now
 
@@ -169,6 +170,10 @@ class SQLiteResearchRepository:
                         raise ResearchConflict("论文版本已经绑定资料，不允许覆盖")
                     current.artifact_id = request.artifact_id
                     current.content_scope = request.content_scope
+                    if request.content_scope == "abstract":
+                        current.abstract_artifact_id = request.artifact_id
+                    elif request.content_scope == "full_text":
+                        current.full_text_artifact_id = request.artifact_id
                     self._conn.execute(
                         "UPDATE research_paper_versions SET artifact_id=?, data_json=? WHERE paper_version_id=?",
                         (current.artifact_id, current.model_dump_json(), current.paper_version_id),
@@ -177,12 +182,37 @@ class SQLiteResearchRepository:
             record = PaperVersion(
                 **request.model_dump(), project_id=project_id, paper_id=paper_id,
                 paper_version_id=new_id("version"), created_at=utc_now(),
+                abstract_artifact_id=(request.artifact_id if request.content_scope == "abstract" else None),
+                full_text_artifact_id=(request.artifact_id if request.content_scope == "full_text" else None),
             )
             self._conn.execute("INSERT INTO research_paper_versions VALUES (?, ?, ?, ?, ?, ?)", (
                 record.paper_version_id, project_id, paper_id, record.version,
                 record.artifact_id, record.model_dump_json(),
             ))
         return record
+
+    def promote_full_text(self, project_id: str, paper_version_id: str,
+                          artifact_id: str) -> PaperVersion:
+        """Make a validated PDF active while retaining any abstract material."""
+        with self._write():
+            current = self.get(project_id, "papers", paper_version_id)
+            self.get(project_id, "artifacts", artifact_id)
+            if current.content_scope == "full_text":
+                if current.artifact_id != artifact_id:
+                    raise ResearchConflict("论文版本已经绑定另一份全文资料")
+                return current
+            if current.content_scope not in {None, "abstract"}:
+                raise ResearchConflict("论文版本已绑定其他资料，不允许替换")
+            if current.content_scope == "abstract":
+                current.abstract_artifact_id = current.artifact_id
+            current.artifact_id = artifact_id
+            current.full_text_artifact_id = artifact_id
+            current.content_scope = "full_text"
+            self._conn.execute(
+                "UPDATE research_paper_versions SET artifact_id=?, data_json=? WHERE paper_version_id=?",
+                (artifact_id, current.model_dump_json(), paper_version_id),
+            )
+            return current
 
     def record_read(self, project_id: str, paper_version_id: str, page: int):
         with self._write():
@@ -223,3 +253,56 @@ class SQLiteResearchRepository:
                 self._conn.execute("INSERT INTO research_claim_evidence VALUES (?, ?, ?, ?)",
                                    (project_id, record.claim_id, link.evidence_id, link.relation))
         return record
+
+    def save_query(self, record: ResearchQueryRecord) -> ResearchQueryRecord:
+        with self._write():
+            self.get_project(record.project_id)
+            self._conn.execute(
+                "INSERT INTO research_queries VALUES (?, ?, ?, ?)",
+                (record.query_id, record.project_id, record.created_at, record.model_dump_json()),
+            )
+        return record
+
+    def list_queries(self, project_id: str, limit: int = 50, offset: int = 0) -> list[ResearchQueryRecord]:
+        with self._lock:
+            self.get_project(project_id)
+            rows = self._conn.execute(
+                """SELECT data_json FROM research_queries WHERE project_id=?
+                   ORDER BY created_at DESC, query_id DESC LIMIT ? OFFSET ?""",
+                (project_id, limit, offset),
+            ).fetchall()
+            return [ResearchQueryRecord.model_validate_json(row["data_json"]) for row in rows]
+
+    def get_search_embedding(self, project_id: str, resource: str, record_id: str,
+                             model: str, text_sha256: str) -> list[float] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT vector_json, text_sha256 FROM research_search_embeddings
+                   WHERE project_id=? AND resource=? AND record_id=? AND model=?""",
+                (project_id, resource, record_id, model),
+            ).fetchone()
+            if row is None or row["text_sha256"] != text_sha256:
+                return None
+            value = json.loads(row["vector_json"])
+            return [float(item) for item in value]
+
+    def save_search_embeddings(self, entries: list[dict]) -> None:
+        if not entries:
+            return
+        with self._write():
+            for entry in entries:
+                self.get_project(entry["project_id"])
+                self._conn.execute(
+                    """INSERT INTO research_search_embeddings
+                       (project_id, resource, record_id, model, text_sha256, vector_json, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(project_id, resource, record_id, model) DO UPDATE SET
+                         text_sha256=excluded.text_sha256,
+                         vector_json=excluded.vector_json,
+                         updated_at=excluded.updated_at""",
+                    (
+                        entry["project_id"], entry["resource"], entry["record_id"],
+                        entry["model"], entry["text_sha256"],
+                        json.dumps(entry["vector"], separators=(",", ":")), entry["updated_at"],
+                    ),
+                )

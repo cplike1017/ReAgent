@@ -1,0 +1,92 @@
+[
+  {
+    "source_id": "synthetic-evidence-01",
+    "title": "Synthetic value-estimation evidence fixture",
+    "statements": [
+      {"quote": "Fixture 01 statement A records a deterministic value-estimation example.", "claim": "Fixture 01 contains a deterministic value-estimation example.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 01 statement B labels every reported number as synthetic.", "claim": "Fixture 01 labels its reported numbers as synthetic.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 01 statement C does not report a trained policy result.", "claim": "Fixture 01 does not report a trained policy result.", "kind": "fact", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-02",
+    "title": "Synthetic replay-buffer evidence fixture",
+    "statements": [
+      {"quote": "Fixture 02 statement A describes a fictional replay-buffer configuration.", "claim": "Fixture 02 describes a fictional replay-buffer configuration.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 02 statement B separates collection steps from update steps.", "claim": "Fixture 02 distinguishes collection steps from update steps.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 02 statement C leaves performance comparisons untested.", "claim": "Fixture 02 leaves performance comparisons untested.", "kind": "inference", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-03",
+    "title": "Synthetic policy-gradient evidence fixture",
+    "statements": [
+      {"quote": "Fixture 03 statement A names a hypothetical policy-gradient update.", "claim": "Fixture 03 names a hypothetical policy-gradient update.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 03 statement B records no environment interaction.", "claim": "Fixture 03 records no environment interaction.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 03 statement C requires later validation with real runs.", "claim": "Fixture 03 requires later validation with real runs.", "kind": "hypothesis", "relation": "background"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-04",
+    "title": "Synthetic offline-RL evidence fixture",
+    "statements": [
+      {"quote": "Fixture 04 statement A identifies its dataset as generated text.", "claim": "Fixture 04 identifies its dataset as generated text.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 04 statement B contains no logged behavior trajectories.", "claim": "Fixture 04 contains no logged behavior trajectories.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 04 statement C cannot establish offline-policy quality.", "claim": "Fixture 04 cannot establish offline-policy quality.", "kind": "inference", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-05",
+    "title": "Synthetic exploration evidence fixture",
+    "statements": [
+      {"quote": "Fixture 05 statement A lists a fictional exploration schedule.", "claim": "Fixture 05 lists a fictional exploration schedule.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 05 statement B provides no reward observations.", "claim": "Fixture 05 provides no reward observations.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 05 statement C leaves the schedule effect unknown.", "claim": "Fixture 05 leaves the schedule effect unknown.", "kind": "hypothesis", "relation": "background"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-06",
+    "title": "Synthetic multi-agent coordination evidence fixture",
+    "statements": [
+      {"quote": "Fixture 06 statement A mentions two fictional cooperating agents.", "claim": "Fixture 06 mentions two fictional cooperating agents.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 06 statement B defines no observation or action tensors.", "claim": "Fixture 06 defines no observation or action tensors.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 06 statement C does not demonstrate coordination learning.", "claim": "Fixture 06 does not demonstrate coordination learning.", "kind": "inference", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-07",
+    "title": "Synthetic evaluation-protocol evidence fixture",
+    "statements": [
+      {"quote": "Fixture 07 statement A names three placeholder evaluation seeds.", "claim": "Fixture 07 names three placeholder evaluation seeds.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 07 statement B marks the seed values as nonexperimental.", "claim": "Fixture 07 marks its seed values as nonexperimental.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 07 statement C reports no confidence interval.", "claim": "Fixture 07 reports no confidence interval.", "kind": "fact", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-08",
+    "title": "Synthetic checkpoint-selection evidence fixture",
+    "statements": [
+      {"quote": "Fixture 08 statement A describes a placeholder checkpoint rule.", "claim": "Fixture 08 describes a placeholder checkpoint rule.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 08 statement B does not select a checkpoint from test returns.", "claim": "Fixture 08 does not select a checkpoint from test returns.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 08 statement C needs real validation data before use.", "claim": "Fixture 08 needs real validation data before use.", "kind": "hypothesis", "relation": "background"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-09",
+    "title": "Synthetic robustness evidence fixture",
+    "statements": [
+      {"quote": "Fixture 09 statement A names a fictional perturbation setting.", "claim": "Fixture 09 names a fictional perturbation setting.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 09 statement B contains no robustness measurement.", "claim": "Fixture 09 contains no robustness measurement.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 09 statement C cannot support a robustness conclusion.", "claim": "Fixture 09 cannot support a robustness conclusion.", "kind": "inference", "relation": "supports"}
+    ]
+  },
+  {
+    "source_id": "synthetic-evidence-10",
+    "title": "Synthetic reproducibility evidence fixture",
+    "statements": [
+      {"quote": "Fixture 10 statement A declares the acceptance corpus synthetic.", "claim": "Fixture 10 declares the acceptance corpus synthetic.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 10 statement B records that no model call is required.", "claim": "Fixture 10 records that no model call is required.", "kind": "fact", "relation": "supports"},
+      {"quote": "Fixture 10 statement C records that no training is executed.", "claim": "Fixture 10 records that no training is executed.", "kind": "fact", "relation": "supports"}
+    ]
+  }
+]

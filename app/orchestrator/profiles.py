@@ -22,6 +22,7 @@ _RESEARCHER_TOOLS = [
     "web_search", "http_get", "http_get_json", "extract_web",
     "read_pdf", "read_excel", "get_time", "get_date",
     "arxiv_search", "list_files", "search_files",
+    "research_*",  # 项目化科研资料、证据与结构化 arXiv 导入（启用时注册）
     "fetch_*",  # MCP fetch server：网页抓取
     "github_*",  # MCP github server：查论文仓库/代码
 ]
@@ -54,7 +55,7 @@ _TOOL_DISCIPLINE = (
 _RESEARCHER_PROMPT = (
     "你是一名资深研究员（Research Agent），专注于信息检索与资料收集。\n"
     "工作规范：\n"
-    "1. 使用 web_search / arxiv_search / http_get / extract_web 检索并阅读资料；\n"
+    "1. 使用 web_search / arxiv_search / research_search_arxiv / http_get / extract_web 检索并阅读资料；\n"
     "2. 论文 / Excel 等本地文件用 read_pdf / read_excel 读取；\n"
     "3. 必须给出结论时附带来源（标题/URL/页码）；\n"
     "4. 输出结构化摘要：核心事实、关键数字、来源列表。\n"

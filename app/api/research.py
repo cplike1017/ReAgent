@@ -5,7 +5,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.research.errors import ResearchError
-from app.research.models import ArtifactImport, ClaimCreate, EvidenceCreate, PaperImport, ProjectCreate
+from app.research.models import (
+    ArxivImport, ArtifactImport, ClaimCreate, EvidenceCreate, PaperImport, ProjectCreate,
+    ResearchSearchRequest,
+)
 from app.research.service import ResearchService
 
 router = APIRouter(prefix="/api/research", tags=["research"])
@@ -65,6 +68,23 @@ def import_paper(project_id: str, body: PaperImport, service: Service):
     return service.repository.import_paper(project_id, body)
 
 
+@router.get("/literature/arxiv/search")
+def search_arxiv(service: Service, query: Annotated[str, Query(min_length=1, max_length=500)],
+                 max_results: Annotated[int, Query(ge=1, le=10)] = 5,
+                 sort_by: Literal["relevance", "submittedDate"] = "relevance"):
+    return service.search_arxiv(query, max_results, sort_by)
+
+
+@router.post("/projects/{project_id}/papers/import/arxiv")
+def import_arxiv(project_id: str, body: ArxivImport, service: Service):
+    return service.import_arxiv(project_id, body.arxiv_id)
+
+
+@router.post("/projects/{project_id}/papers/import/arxiv/full-text")
+def import_arxiv_full_text(project_id: str, body: ArxivImport, service: Service):
+    return service.import_arxiv_full_text(project_id, body.arxiv_id)
+
+
 @router.get("/projects/{project_id}/papers/{paper_version_id}/text")
 def read_page(project_id: str, paper_version_id: str, service: Service,
               page: Annotated[int, Query(ge=1)] = 1,
@@ -86,6 +106,16 @@ def create_claim(project_id: str, body: ClaimCreate, service: Service):
 def export_report(project_id: str, service: Service):
     return Response(service.export_report(project_id), media_type="text/markdown",
                     headers={"Content-Disposition": 'attachment; filename="research-report.md"'})
+
+
+@router.post("/projects/{project_id}/search")
+async def search_project(project_id: str, body: ResearchSearchRequest, service: Service):
+    return await service.search_project(project_id, body)
+
+
+@router.get("/projects/{project_id}/queries")
+def list_queries(project_id: str, service: Service, limit: Limit = 50, offset: Offset = 0):
+    return {"items": service.repository.list_queries(project_id, limit, offset)}
 
 
 @router.get("/projects/{project_id}/{resource}")

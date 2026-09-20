@@ -83,6 +83,17 @@ class ToolRegistry:
         """供 LLM 使用的 tools 参数列表。"""
         return [t.to_openai_schema() for t in self._tools.values()]
 
+    def subset(self, names: set[str] | frozenset[str]) -> "ToolRegistry":
+        """Return a registry containing exactly the requested existing tools."""
+        missing = set(names) - set(self._tools)
+        if missing:
+            raise ToolError(f"工具白名单包含未注册项: {sorted(missing)}")
+        selected = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name in names:
+                selected.register(tool)
+        return selected
+
     async def execute(self, name: str, args: dict) -> ToolResult:
         """
         Stage 1 的直接执行入口：参数校验（pydantic）→ 调用处理器 → 统一信封。

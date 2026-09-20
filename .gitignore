@@ -19,6 +19,7 @@ build/
 dist/
 .playwright-cli/
 output/playwright/
+output/research-tools-*/
 .worktrees/
 
 # IDE

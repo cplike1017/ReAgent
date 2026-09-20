@@ -2,9 +2,11 @@
 import hashlib
 
 from app.research.artifacts import ArtifactStore
-from app.research.errors import ResearchError
-from app.research.models import EvidenceCreate, EvidenceSpan
+from app.research.errors import ResearchConflict, ResearchError
+from app.research.literature import ArxivClient
+from app.research.models import EvidenceCreate, EvidenceSpan, PaperImport
 from app.research.repository import SQLiteResearchRepository, new_id
+from app.research.retrieval import ResearchRetriever
 from app.session.repository import utc_now
 
 
@@ -13,9 +15,17 @@ def normalized_text(text: str) -> str:
 
 
 class ResearchService:
-    def __init__(self, repository: SQLiteResearchRepository, artifacts: ArtifactStore):
+    def __init__(self, repository: SQLiteResearchRepository, artifacts: ArtifactStore,
+                 literature: ArxivClient | None = None, embedding=None):
         self.repository = repository
         self.artifacts = artifacts
+        self.literature = literature or ArxivClient()
+        self.embedding = embedding
+        self.retriever = ResearchRetriever(repository, artifacts, embedding)
+
+    async def search_project(self, project_id: str, request):
+        self.retriever.embedding = self.embedding
+        return await self.retriever.search(project_id, request)
 
     def import_artifact(self, project_id: str, path: str):
         self.repository.get_project(project_id)
@@ -24,6 +34,75 @@ class ResearchService:
         # an unreferenced hash file; retry safely adopts it, never a missing blob.
         return self.repository.save_artifact(artifact)
 
+    def search_arxiv(self, query: str, max_results: int = 5, sort_by: str = "relevance") -> dict:
+        return self.literature.search(query, max_results, sort_by)
+
+    @staticmethod
+    def _arxiv_metadata(item) -> PaperImport:
+        return PaperImport(
+            source="arxiv", source_id=item.source_id, version=item.version,
+            title=item.title, authors=item.authors, source_url=item.source_url,
+            published_at=item.published_at, updated_at=item.updated_at,
+            categories=item.categories, primary_category=item.primary_category,
+        )
+
+    def import_arxiv(self, project_id: str, arxiv_id: str) -> dict:
+        self.repository.get_project(project_id)
+        item = self.literature.exact(arxiv_id)
+        metadata = self._arxiv_metadata(item)
+        paper = self.repository.import_paper(project_id, metadata)
+        if paper.artifact_id is not None:
+            artifact = self.repository.get(project_id, "artifacts", paper.artifact_id)
+            return {"paper": paper.model_dump(mode="json"), "artifact": artifact.model_dump(mode="json")}
+        safe_id = item.arxiv_id.replace("/", "-")
+        artifact = self.artifacts.import_bytes(
+            project_id, f"arxiv-{safe_id}-abstract.txt", item.abstract.encode("utf-8"), "text/plain",
+        )
+        artifact = self.repository.save_artifact(artifact)
+        attached = metadata.model_copy(update={"artifact_id": artifact.artifact_id, "content_scope": "abstract"})
+        paper = self.repository.import_paper(project_id, attached)
+        return {"paper": paper.model_dump(mode="json"), "artifact": artifact.model_dump(mode="json")}
+
+    @staticmethod
+    def _validate_pdf(content: bytes) -> None:
+        import pymupdf as fitz
+        try:
+            with fitz.open(stream=content, filetype="pdf") as document:
+                if document.needs_pass:
+                    raise ResearchError(
+                        "暂不支持加密 arXiv PDF", code="literature_pdf_invalid", status=422,
+                    )
+                if document.page_count < 1:
+                    raise ResearchError(
+                        "arXiv PDF 没有可读取页面", code="literature_pdf_invalid", status=422,
+                    )
+        except (RuntimeError, ValueError) as exc:
+            raise ResearchError(
+                "arXiv PDF 无法解析", code="literature_pdf_invalid", status=422,
+            ) from exc
+
+    def import_arxiv_full_text(self, project_id: str, arxiv_id: str) -> dict:
+        self.repository.get_project(project_id)
+        item = self.literature.exact(arxiv_id)
+        metadata = self._arxiv_metadata(item)
+        paper = self.repository.import_paper(project_id, metadata)
+        if paper.content_scope == "full_text":
+            artifact = self.repository.get(project_id, "artifacts", paper.artifact_id)
+            return {"paper": paper.model_dump(mode="json"), "artifact": artifact.model_dump(mode="json")}
+        if paper.content_scope not in {None, "abstract"}:
+            raise ResearchConflict("论文版本已绑定其他资料，不允许替换")
+        content = self.literature.download_pdf(arxiv_id)
+        self._validate_pdf(content)
+        safe_id = item.arxiv_id.replace("/", "-")
+        artifact = self.artifacts.import_bytes(
+            project_id, f"arxiv-{safe_id}.pdf", content, "application/pdf",
+        )
+        artifact = self.repository.save_artifact(artifact)
+        paper = self.repository.promote_full_text(
+            project_id, paper.paper_version_id, artifact.artifact_id,
+        )
+        return {"paper": paper.model_dump(mode="json"), "artifact": artifact.model_dump(mode="json")}
+
     def _page(self, project_id: str, paper_version_id: str, page: int):
         paper = self.repository.get(project_id, "papers", paper_version_id)
         if paper.artifact_id is None:
@@ -31,7 +110,7 @@ class ResearchService:
         artifact = self.repository.get(project_id, "artifacts", paper.artifact_id)
         path = self.artifacts.verified_path(artifact)
         if artifact.media_type == "application/pdf":
-            import fitz
+            import pymupdf as fitz
             try:
                 with fitz.open(path) as document:
                     if document.needs_pass:

@@ -316,7 +316,7 @@ def test_migrations_preserve_legacy_data_and_reapply_safely(research_settings):
             assert client.get("/api/research/projects").status_code == 200
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT * FROM legacy_record").fetchall() == [("keep me",)]
-        assert conn.execute("SELECT version FROM research_schema_migrations").fetchall() == [(1,)]
+        assert conn.execute("SELECT version FROM research_schema_migrations").fetchall() == [(1,), (2,)]
 
 
 def test_failed_migration_rolls_back_schema_and_version(monkeypatch):
@@ -324,12 +324,12 @@ def test_failed_migration_rolls_back_schema_and_version(monkeypatch):
 
     with sqlite3.connect(":memory:") as conn:
         migrations.apply_migrations(conn)
-        monkeypatch.setattr(migrations, "MIGRATIONS", migrations.MIGRATIONS + [(2, (
+        monkeypatch.setattr(migrations, "MIGRATIONS", migrations.MIGRATIONS + [(3, (
             "CREATE TABLE research_partial (value TEXT)", "INVALID SQL",
         ))])
         with pytest.raises(sqlite3.OperationalError):
             migrations.apply_migrations(conn)
-        assert conn.execute("SELECT version FROM research_schema_migrations").fetchall() == [(1,)]
+        assert conn.execute("SELECT version FROM research_schema_migrations").fetchall() == [(1,), (2,)]
         assert not conn.execute("SELECT name FROM sqlite_master WHERE name='research_partial'").fetchall()
 
 

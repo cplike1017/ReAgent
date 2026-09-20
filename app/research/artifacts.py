@@ -70,6 +70,38 @@ class ArtifactStore:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def import_bytes(self, project_id: str, name: str, content: bytes,
+                     media_type: str = "application/octet-stream") -> Artifact:
+        """Store trusted, server-fetched content as an immutable snapshot."""
+        if not name or Path(name).name != name or PureWindowsPath(name).name != name:
+            raise ResearchError("产物名称无效")
+        if not content:
+            raise ResearchError("资料内容不能为空")
+        if len(content) > self.max_bytes:
+            raise ResearchError("资料超过大小限制", code="artifact_too_large", status=413)
+        directory = self._path(project_id, ".")
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(suffix=".part", dir=directory)
+        temporary = Path(temporary_name)
+        sha256 = hashlib.sha256(content).hexdigest()
+        try:
+            with os.fdopen(fd, "wb") as output:
+                output.write(content)
+                output.flush()
+                os.fsync(output.fileno())
+            destination = self._path(project_id, sha256)
+            if destination.exists():
+                if hashlib.sha256(destination.read_bytes()).hexdigest() != sha256:
+                    raise ResearchError("已有产物校验失败", code="artifact_integrity", status=409)
+            else:
+                os.replace(temporary, destination)
+            return Artifact(
+                artifact_id=new_id("artifact"), project_id=project_id, name=name,
+                media_type=media_type, sha256=sha256, size_bytes=len(content), created_at=utc_now(),
+            )
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def verified_path(self, artifact: Artifact) -> Path:
         path = self._path(artifact.project_id, artifact.sha256)
         if not path.is_file() or path.stat().st_size != artifact.size_bytes:

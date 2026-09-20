@@ -10,20 +10,13 @@
     - 只请求 arXiv 官方 API；响应大小限制 32KB；
     - 无 Key、零依赖（免费 API），失败返回结构化错误。
 """
-import re
-import xml.etree.ElementTree as ET
-
 import httpx
 from pydantic import BaseModel, Field
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.errors import ToolExecutionError
-
-ARXIV_API = "https://export.arxiv.org/api/query"
-# 注意：不能截断 XML 响应（会切断 <entry> 结构导致解析失败）；
-# 限制放在解析后的输出层（摘要/作者字段截断）。
-MAX_ENTRIES = 10
-_NS = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
+from app.research.errors import ResearchError
+from app.research.literature import ArxivClient, parse_arxiv_atom
 
 
 class ArxivSearchArgs(BaseModel):
@@ -36,38 +29,21 @@ class ArxivSearchArgs(BaseModel):
 
 def arxiv_search_handler(query: str, max_results: int = 5, sort_by: str = "relevance") -> str:
     """检索 arXiv 论文，返回结构化列表文本。"""
-    settings = get_settings()
     if not query.strip():
         raise ToolExecutionError("检索关键词不能为空")
     sort = "relevance" if sort_by == "relevance" else "submittedDate"
-    # 显式字段/布尔表达式交给 arXiv 解释；普通关键词取交集，短语由用户加引号。
-    query_text = query.strip()
-    explicit_syntax = re.search(r'\b\w+:|\b(?:AND|OR|ANDNOT)\b|[()"]', query_text)
-    search_query = query_text if explicit_syntax else " AND ".join(
-        f"all:{word}" for word in query_text.split()
-    )
-    params = {
-        "search_query": search_query,
-        "start": 0,
-        "max_results": max_results,
-        "sortBy": sort,
-        "sortOrder": "descending" if sort == "submittedDate" else "ascending",
-    }
     try:
-        resp = httpx.get(ARXIV_API, params=params, timeout=settings.http_tool_timeout_seconds, follow_redirects=True)
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise ToolExecutionError(f"arXiv API 请求失败: {exc}")
-
-    entries = _parse_arxiv_atom(resp.text)
+        entries = ArxivClient(get_settings()).search(query, max_results, sort)["items"]
+    except ResearchError as exc:
+        raise ToolExecutionError(str(exc), code=exc.code) from exc
     if not entries:
         return "arXiv 未检索到相关论文。"
     lines = [f"arXiv 检索「{query}」共 {len(entries)} 条结果：", ""]
     for i, e in enumerate(entries, 1):
         lines.append(f"{i}. **{e['title']}**")
-        lines.append(f"   作者: {e['authors']}")
-        lines.append(f"   年份: {e['year']} | 链接: {e['link']}")
-        lines.append(f"   首次发表: {e['published']} | 最近更新: {e['updated']}")
+        lines.append(f"   作者: {', '.join(e['authors']) or '未知'}")
+        lines.append(f"   年份: {e['published_at'][:4]} | 链接: {e['source_url']}")
+        lines.append(f"   首次发表: {e['published_at']} | 最近更新: {e['updated_at']}")
         if e["abstract"]:
             lines.append(f"   摘要: {e['abstract'][:220]}")
         lines.append("")
@@ -75,36 +51,13 @@ def arxiv_search_handler(query: str, max_results: int = 5, sort_by: str = "relev
 
 
 def _parse_arxiv_atom(xml_text: str) -> list[dict]:
-    """解析 arXiv Atom XML → 论文条目列表。"""
+    """Legacy formatted parser backed by the shared structured Atom parser."""
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        raise ToolExecutionError("arXiv 返回了无法解析的 XML，不能判断是否有相关论文") from exc
-    if root.tag != f"{{{_NS['atom']}}}feed":
-        raise ToolExecutionError("arXiv 返回的内容不是 Atom feed")
-    entries = []
-    for entry in root.findall("atom:entry", _NS):
-        title = _clean((entry.findtext("atom:title", "", _NS) or ""))
-        link_el = entry.find("atom:id", _NS)
-        link = (link_el.text or "").strip() if link_el is not None else ""
-        if "/api/errors" in link:
-            raise ToolExecutionError("arXiv API 返回查询错误，请检查检索表达式")
-        authors = [a.findtext("atom:name", "", _NS).strip() for a in entry.findall("atom:author", _NS)]
-        authors = [a for a in authors if a and a != ":"]
-        published = entry.findtext("atom:published", "", _NS) or ""
-        updated = entry.findtext("atom:updated", "", _NS) or ""
-        abstract = _clean((entry.findtext("atom:summary", "", _NS) or ""))
-        entries.append({
-            "title": title or "(无标题)",
-            "authors": ", ".join(a for a in authors if a)[:120] or "未知",
-            "year": published[:4],
-            "published": published,
-            "updated": updated,
-            "link": link,
-            "abstract": abstract,
-        })
-    return entries
-
-
-def _clean(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+        items = parse_arxiv_atom(xml_text)
+    except ResearchError as exc:
+        raise ToolExecutionError(str(exc), code=exc.code) from exc
+    return [{
+        "title": item.title, "authors": ", ".join(item.authors)[:120] or "未知",
+        "year": item.published_at[:4], "published": item.published_at,
+        "updated": item.updated_at, "link": str(item.source_url), "abstract": item.abstract,
+    } for item in items]
