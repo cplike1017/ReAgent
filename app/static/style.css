@@ -1583,6 +1583,29 @@ body[data-primary-view="chat"] .sidebar-scroll { display: none; }
 .resource-workspace-actions { display: flex; justify-content: flex-end; }
 .resource-primary-action { min-height: 34px; padding: 0 12px; border-radius: 8px; color: var(--text-inverse); background: var(--action-bg); cursor: pointer; font-size: 12px; font-weight: 700; }
 .resource-primary-action:hover { background: var(--action-hover); }
+.research-project-list li { padding: 0 !important; }
+.research-project-button { display: grid; width: 100%; gap: 3px; padding: 9px 8px; border: 1px solid transparent; border-radius: 8px; color: var(--sidebar-text); text-align: left; background: transparent; cursor: pointer; }
+.research-project-button:hover { background: var(--sidebar-hover); }
+.research-project-button.active { border-color: color-mix(in srgb, var(--accent) 34%, var(--border)); background: var(--accent-soft); }
+.research-project-button strong,
+.research-project-button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.research-project-button strong { font-size: 11px; }
+.research-project-button span { color: var(--sidebar-muted); font-size: 9px; }
+.research-export-actions { flex-wrap: wrap; }
+.research-export-action { display: inline-flex; align-items: center; text-decoration: none; }
+.research-import-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(130px, .55fr) auto; gap: 10px; align-items: end; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.research-import-form > div { display: grid; grid-column: 1 / -1; gap: 3px; align-self: center; }
+.research-import-form > div strong { color: var(--text-primary); font-size: 13px; }
+.research-import-form > div span,
+.research-import-form label > span { color: var(--text-secondary); font-size: 10px; line-height: 1.4; }
+.research-import-form label { display: grid; gap: 5px; }
+.research-import-form input,
+.research-import-form select { width: 100%; min-height: 34px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--surface-subtle); font: inherit; }
+.research-import-form input:disabled,
+.research-import-form select:disabled { cursor: wait; opacity: .65; }
+.research-evidence-card { align-content: start; }
+.research-evidence-quote { margin: 2px 0; padding: 8px 9px; border-left: 3px solid var(--accent); color: var(--text); background: var(--surface-subtle); font-size: 11px; line-height: 1.55; }
+.research-evidence-claims { display: grid; gap: 4px; margin: 3px 0 0; padding: 7px 0 0 17px; border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 10px; line-height: 1.45; }
 .resource-section { display: grid; gap: 9px; }
 .resource-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .resource-section-heading h3 { margin: 0; color: var(--text-primary); font-size: 13px; }
@@ -1815,6 +1838,8 @@ body[data-primary-view]:not([data-primary-view="chat"]) .workspace { grid-templa
   .send-btn span { display: none; }
   .execution-panel { top: 56px; bottom: 56px; width: min(100vw - 18px, 390px); }
   .jump-latest { right: 20px; bottom: 75px; }
+  .research-import-form { grid-template-columns: minmax(0, 1fr); }
+  .research-export-actions { justify-content: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }

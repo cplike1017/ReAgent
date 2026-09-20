@@ -4,7 +4,7 @@
 
 产品目标是通用 Agent 加上可复用的强化学习科研能力：根据用户问题选择资料、工具和工作流。PPO、其他算法及不同实验环境应作为项目输入或适配器配置，不能成为公共模型、路由或任务规划的固定前提。
 
-这不是整个 M0–M6 路线图的完成状态。当前全文能力限于受控 arXiv PDF 快照和按需页提取；批量资料集、OCR、PDF 分块索引、ExperimentSpec/Run、方法卡、科研 UI、统计分析和训练 Runner 仍在后续工作包中。Web 聊天通过 ToolGateway 调用与 API 相同的 ResearchService，不绕经内部 HTTP。
+这不是整个 M0–M6 路线图的完成状态。当前全文能力限于受控 arXiv PDF 快照和按需页提取；批量资料集、OCR、PDF 分块索引、ExperimentSpec/Run、方法卡、统计分析和训练 Runner 仍在后续工作包中。Web 聊天通过 ToolGateway 调用与 API 相同的 ResearchService，不绕经内部 HTTP。
 
 ## 1. 启用与存储
 
@@ -184,11 +184,13 @@ M1 真实供应商验收脚本（2026-09-20）：新增隔离的公开 DQN `1312
 
 工具白名单复测使用同一论文和验收标准，只暴露 4 个必需工具：5 次模型调用、4 次工具调用、18,143 tokens，一次通过，较前次总 token 减少约 69.7%。这说明工具 Schema 是主要上下文成本之一；该白名单仅用于固定验收运行，不改变 Web 默认工具集。
 
-Web Agent 工具、R02 的结构化 arXiv 元数据/摘要导入、R03 的受控 PDF 快照/页级读取、fixed 10/30 工程门槛、一个真实模型非 PPO 任务、持久查询历史、项目混合检索以及比较/引用导出已经落地。下一步补 Library/Evidence Inspector，再进入 R04 方法卡和 ExperimentSpec 校验。R05 实现按独立训练 seed 进行的统计分析。算法特定规则和执行命令通过适配器提供，验收必须同时覆盖非 PPO 任务和不涉及训练的文献任务。
+Web Agent 工具、R02 的结构化 arXiv 元数据/摘要导入、R03 的受控 PDF 快照/页级读取、fixed 10/30 工程门槛、一个真实模型非 PPO 任务、持久查询历史、项目混合检索、比较/引用导出以及 Library/Evidence Inspector 最小界面已经落地。下一步进入 R04 方法卡和 ExperimentSpec 校验。R05 实现按独立训练 seed 进行的统计分析。算法特定规则和执行命令通过适配器提供，验收必须同时覆盖非 PPO 任务和不涉及训练的文献任务。
 
 M1 检索切片验收（2026-09-20）：6 项查询/迁移契约、90 项科研组合回归通过；最终全量 495 passed、3 skipped，保留同一个依赖警告。Docker 在持久 `/data` 上应用迁移 `[1,2]`，真实 `qwen3.7-text-embedding` 返回 1024 维向量；两篇 synthetic 元数据的重复混合查询保持同一首位结果、2 个候选缓存和 2 条查询历史，API 重启后历史仍可读取。该验收不表示 PDF 全文已建立向量索引或结果经过人工语义判定。
 
 M1 比较与引用导出验收（2026-09-20）：项目级 CSV/BibTeX API 和两个 Agent 工具契约通过；科研组合 93 passed，最终全量 498 passed、3 skipped，另有 5 条既有 PyMuPDF SWIG 类型弃用警告。重复导出逐字节一致，跨项目资料不会进入结果；CSV 只汇总已保存的来源、阅读范围、Evidence 数量和关联 Claim，BibTeX 保留精确版本。该导出不推断论文方法结论，也不完成 Claim 的语义核验。
+
+M1 Library/Evidence Inspector 验收（2026-09-20）：前端专项 109 passed；最终全量 504 passed、3 skipped，保留同样 5 条既有 PyMuPDF SWIG 类型弃用警告。Docker 重建后确认 `/data` 项目仍可读取；独立临时数据库中的 Project→Paper→Evidence→Claim 链在真实浏览器中完整显示。Playwright 在桌面和 390×844 移动视口核对了项目导航、三种导出、精确版本导入、阅读范围、原文定位与 `unverified` 关系；实际 422 导入失败保留输入并恢复控件。浏览器控制台仅有未配置 `favicon.ico` 的既有 404，不影响功能。
 
 <a id="research-chat-tools"></a>
 
@@ -227,6 +229,12 @@ M1 比较与引用导出验收（2026-09-20）：项目级 CSV/BibTeX API 和两
 比较矩阵和引用也只从单个项目的持久记录生成：`GET /api/research/projects/{project_id}/exports/comparison.csv` 汇总论文版本、来源、阅读范围、Evidence 数量和已关联的待核验 Claim；`GET /api/research/projects/{project_id}/exports/references.bib` 为 arXiv、DOI 或本地来源生成稳定引用键和版本字段。两种导出均不会从标题或摘要推断方法结论，也不会将 Claim 提升为已核验。
 
 当前接入 Web 进程内运行时。Redis Worker 工厂尚未注入科研服务；Web 编排中的 researcher 档案可使用 `research_*`，其他专用档案保持原白名单。单用户项目关联校验不等同于多用户权限控制。
+
+### Research 工作区
+
+左侧 `Research` 导航按项目加载 Library 与 Evidence Inspector。Library 显示精确论文版本、资料范围、已读取页和 Evidence 数量；Evidence Inspector 展示原文摘录、物理/逻辑页定位以及关联 Claim 的关系和 `unverified` 状态。项目切换只有在 papers/evidence/claims 三类记录全部成功返回后才提交，刷新或局部请求失败会保留当前已加载数据。
+
+工作区提供比较 CSV、BibTeX 和 Markdown 报告的下载入口，并允许按带 `vN` 的精确 arXiv ID 导入摘要或完整 PDF。失败时 ID 与范围保持不变、控件恢复可用，可直接重试；重复提交仍由服务端版本与 Artifact 去重契约处理。该界面不提供 Claim 已核验按钮，也不会把资料导入状态解释为已阅读或已验证。
 
 ### 项目混合检索与查询历史
 

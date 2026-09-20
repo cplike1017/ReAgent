@@ -102,7 +102,7 @@ python -m demos.research_foundation_demo --output data/research-demo
 
 输出包含 `report.md`、SQLite 数据库、来源文件、资料快照与校验清单。重复运行请更换输出目录。查看 [示例报告](docs/examples/ppo-research-foundation-report.md)。
 
-在 `.env` 设置 `RESEARCH_ENABLED=true` 后重启 API；入口为 `/api/research/projects`，Swagger 文档在 `/docs`。同一开关为 Web 聊天注册 18 个 `research_*` 工具，共享项目、查询与证据数据。`GET /api/research/literature/arxiv/search` 返回明确版本、摘要、日期和分类；摘要与受限 PDF 全文分别通过 `/papers/import/arxiv` 和 `/papers/import/arxiv/full-text` 导入。`POST /projects/{project_id}/search` 在项目已保存记录内组合词法与 embedding 排序，并把查询历史持久化；embedding 失败会明确降级，不影响词法结果。项目资料可通过 `/exports/comparison.csv` 和 `/exports/references.bib` 导出确定性比较矩阵与精确版本引用。科研 API 和 Web 直连工具无需 Redis，当前面向本地单用户；尚无专用科研 UI，Redis Worker 尚未接入这组工具。
+在 `.env` 设置 `RESEARCH_ENABLED=true` 后重启 API；入口为 `/api/research/projects`，Swagger 文档在 `/docs`。同一开关为 Web 聊天注册 18 个 `research_*` 工具，共享项目、查询与证据数据。`GET /api/research/literature/arxiv/search` 返回明确版本、摘要、日期和分类；摘要与受限 PDF 全文分别通过 `/papers/import/arxiv` 和 `/papers/import/arxiv/full-text` 导入。`POST /projects/{project_id}/search` 在项目已保存记录内组合词法与 embedding 排序，并把查询历史持久化；embedding 失败会明确降级，不影响词法结果。项目资料可通过 `/exports/comparison.csv` 和 `/exports/references.bib` 导出确定性比较矩阵与精确版本引用。Web 的 Research 工作区提供项目列表、Library、Evidence Inspector、导出入口和可重试的精确 arXiv 导入。科研 API 和 Web 直连工具无需 Redis，当前面向本地单用户；Redis Worker 尚未接入这组工具。
 
 当前验证的是资料归档、结构化 arXiv 元数据、摘要/受控 PDF 快照、页级摘录定位和 Agent 工具链路；报告中的主张保持 `unverified`。运行 `python -m demos.research_tools_demo --output data/research-tools-demo` 可生成非 PPO 主题的离线对话、报告和 Trace；该样例使用脚本模型与合成资料，不是模型自主科研评测。保存 PDF 只证明全文文件已归档；只有 `research_read_page` 返回过的页才进入读取覆盖，系统不做 OCR，也不声称自动读完或核验全文。通用实验协议管理、多 seed 统计和训练后端适配将在后续阶段实现。配置、请求示例、备份与限制见 [科研基础使用说明](docs/rl-research-foundation.md)。
 

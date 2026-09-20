@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v31 */
+/* ReAgent Web UI 前端逻辑 v32 */
 "use strict";
 
 const state = {
@@ -48,6 +48,15 @@ const state = {
     agentStatus: { enabled: true, reason: "" },
     files: [],
   },
+  research: {
+    projects: [],
+    selectedProjectId: null,
+    papers: [],
+    evidence: [],
+    claims: [],
+    projectListVersion: 0,
+    projectLoadVersion: 0,
+  },
   runtimeSettings: null,
 };
 
@@ -60,6 +69,7 @@ const uiState = {
 
 const PRIMARY_VIEW_COPY = Object.freeze({
   chat: ["Sessions", "在当前会话中发起任务并观察真实执行过程。"],
+  research: ["Research", "按项目查看论文版本、阅读范围、证据定位和待核验主张。"],
   agents: ["Agents", "查看当前运行时已提供的子 Agent 档案。"],
   tools: ["Tools", "查看当前运行时已提供的工具与技能。"],
   mcp: ["MCP", "查看当前已连接的 MCP Server。"],
@@ -132,6 +142,7 @@ function setPrimaryView(view) {
     setInspectorCollapsed(false, true);
   }
   renderResourceWorkspace();
+  if (view === "research") void loadResearchProjects();
 }
 
 function focusPrimaryWorkspace(view) {
@@ -198,6 +209,146 @@ function appendResourceSection(container, title, items, emptyCopy) {
   container.appendChild(section);
 }
 
+function researchErrorMessage(data, status) {
+  if (typeof data?.detail === "string") return data.detail;
+  if (typeof data?.detail?.message === "string") return data.detail.message;
+  return "HTTP " + String(status);
+}
+
+function renderResearchSidebar() {
+  const list = $("#research-project-list");
+  const count = $("#research-project-count");
+  if (!list || !count) return;
+  const research = state.research;
+  count.textContent = String(research.projects.length);
+  list.replaceChildren();
+  research.projects.forEach((project) => {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "research-project-button";
+    button.classList.toggle("active", project.project_id === research.selectedProjectId);
+    button.setAttribute("aria-pressed", String(project.project_id === research.selectedProjectId));
+    const title = document.createElement("strong");
+    title.textContent = project.title;
+    const question = document.createElement("span");
+    question.textContent = project.question;
+    button.append(title, question);
+    button.addEventListener("click", () => void loadResearchProject(project.project_id));
+    item.appendChild(button);
+    list.appendChild(item);
+  });
+  if (!research.projects.length) {
+    const empty = document.createElement("li");
+    empty.className = "resource-empty";
+    empty.textContent = "当前没有科研项目。可在聊天中创建后刷新。";
+    list.appendChild(empty);
+  }
+}
+
+function createResearchImportForm() {
+  const form = document.createElement("form");
+  form.className = "research-import-form";
+  form.innerHTML = `
+    <div><p class="eyebrow">Versioned import</p><strong>导入精确 arXiv 版本</strong><span>失败后保留 ID，可直接重试；重复导入由服务端去重。</span></div>
+    <label><span>arXiv ID</span><input id="research-arxiv-id" name="arxiv_id" type="text" placeholder="1707.06347v2" autocomplete="off" required></label>
+    <label><span>资料范围</span><select id="research-import-scope" name="scope"><option value="abstract">摘要快照</option><option value="full_text">完整 PDF</option></select></label>
+    <button class="resource-primary-action" type="submit">导入</button>
+  `;
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void importResearchArxiv();
+  });
+  return form;
+}
+
+function createResearchEvidenceCard(span, claims) {
+  const card = document.createElement("article");
+  card.className = "resource-card research-evidence-card";
+  const heading = document.createElement("strong");
+  heading.textContent = span.evidence_id;
+  const quote = document.createElement("blockquote");
+  quote.className = "research-evidence-quote";
+  quote.textContent = span.quote;
+  const meta = document.createElement("span");
+  meta.className = "resource-card-meta";
+  meta.textContent = `${span.paper_version_id} · ${span.page_kind} ${span.page} · ${span.locator_verified ? "定位已复核" : "定位待复核"}`;
+  card.append(heading, quote, meta);
+  if (claims.length) {
+    const claimList = document.createElement("ul");
+    claimList.className = "research-evidence-claims";
+    claims.forEach((entry) => {
+      const item = document.createElement("li");
+      item.textContent = `[${entry.link.relation} · ${entry.claim.verification_status}] ${entry.claim.text}`;
+      claimList.appendChild(item);
+    });
+    card.appendChild(claimList);
+  }
+  return card;
+}
+
+function renderResearchWorkspace(summary, content) {
+  const research = state.research;
+  const project = research.projects.find((item) => item.project_id === research.selectedProjectId);
+  if (!project) {
+    summary.textContent = research.projects.length ? "选择一个科研项目" : "尚未加载科研项目";
+    appendResourceSection(content, "Library", [], "从左侧选择项目；若列表为空，可在聊天中创建项目后刷新。");
+    return;
+  }
+
+  summary.textContent = `${research.papers.length} 个论文版本 · ${research.evidence.length} 条证据 · ${research.claims.length} 条待核验主张`;
+  const actions = document.createElement("div");
+  actions.className = "resource-workspace-actions research-export-actions";
+  const base = `/api/research/projects/${encodeURIComponent(project.project_id)}`;
+  [
+    ["比较 CSV", `${base}/exports/comparison.csv`, "comparison.csv"],
+    ["BibTeX", `${base}/exports/references.bib`, "references.bib"],
+    ["证据报告", `${base}/report`, "research-report.md"],
+  ].forEach(([label, href, filename]) => {
+    const link = document.createElement("a");
+    link.className = "resource-primary-action research-export-action";
+    link.href = href;
+    link.download = filename;
+    link.textContent = label;
+    actions.appendChild(link);
+  });
+  content.append(actions, createResearchImportForm());
+
+  const evidenceByPaper = new Map();
+  research.evidence.forEach((span) => {
+    const values = evidenceByPaper.get(span.paper_version_id) || [];
+    values.push(span);
+    evidenceByPaper.set(span.paper_version_id, values);
+  });
+  appendResourceSection(content, "Library", research.papers.map((paper) => {
+    const evidenceCount = (evidenceByPaper.get(paper.paper_version_id) || []).length;
+    const coverage = paper.read_scope === "selected_pages"
+      ? `已读取页 ${paper.read_pages.join("、")}`
+      : "仅元数据";
+    return createResourceCard(
+      paper.title,
+      `${paper.authors.join("、") || "作者未登记"} · ${paper.source}:${paper.source_id}`,
+      `${paper.version} · ${paper.content_scope || "metadata"} · ${coverage} · ${evidenceCount} 条证据`,
+    );
+  }), "当前项目没有论文版本。可用上方表单导入精确 arXiv 版本。");
+
+  const evidenceCards = research.evidence.map((span) => {
+    const linked = [];
+    research.claims.forEach((claim) => claim.evidence_links.forEach((link) => {
+      if (link.evidence_id === span.evidence_id) linked.push({ claim, link });
+    }));
+    return createResearchEvidenceCard(span, linked);
+  });
+  appendResourceSection(content, "Evidence Inspector", evidenceCards, "当前项目没有可定位证据；证据必须先由页文本创建。");
+
+  const unlinked = research.claims.filter((claim) => !claim.evidence_links.length);
+  appendResourceSection(content, "Unlinked claims", unlinked.map((claim) => createResourceCard(
+    claim.text,
+    "该主张尚未关联证据。",
+    `${claim.kind} · ${claim.verification_status} · ${claim.claim_id}`,
+  )), "当前没有未关联证据的主张。");
+}
+
 function renderResourceWorkspace() {
   const summary = $("#resource-summary");
   const content = $("#resource-content");
@@ -205,6 +356,11 @@ function renderResourceWorkspace() {
   content.replaceChildren();
   const view = uiState.primaryView;
   const resources = state.resources;
+
+  if (view === "research") {
+    renderResearchWorkspace(summary, content);
+    return;
+  }
 
   if (view === "tools") {
     summary.textContent = String(resources.tools.length) + " 个工具 · " + String(resources.skills.length) + " 项技能";
@@ -330,6 +486,110 @@ function renderResourceWorkspace() {
   }
 
   summary.textContent = "该工作区暂未开放。";
+}
+
+async function loadResearchProjects() {
+  const version = ++state.research.projectListVersion;
+  const refresh = $("#refresh-research-projects");
+  if (refresh) refresh.disabled = true;
+  try {
+    const response = await fetch("/api/research/projects?limit=200&offset=0");
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(researchErrorMessage(data, response.status));
+    if (!Array.isArray(data.items)) throw new Error("科研项目列表格式无效");
+    if (version !== state.research.projectListVersion) return false;
+    state.research.projects = data.items;
+    renderResearchSidebar();
+    if (!data.items.length) {
+      state.research.projectLoadVersion += 1;
+      state.research.selectedProjectId = null;
+      state.research.papers = [];
+      state.research.evidence = [];
+      state.research.claims = [];
+      renderResourceWorkspace();
+      setResourceFeedback("", "");
+      return true;
+    }
+    const selected = data.items.some((item) => item.project_id === state.research.selectedProjectId)
+      ? state.research.selectedProjectId
+      : data.items[0].project_id;
+    return await loadResearchProject(selected);
+  } catch (error) {
+    if (version === state.research.projectListVersion) {
+      renderResearchSidebar();
+      renderResourceWorkspace();
+      setResourceFeedback("error", "科研项目读取失败，已保留当前数据：" + error.message);
+    }
+    return false;
+  } finally {
+    if (refresh && version === state.research.projectListVersion) refresh.disabled = false;
+  }
+}
+
+async function loadResearchProject(projectId) {
+  const version = ++state.research.projectLoadVersion;
+  const base = `/api/research/projects/${encodeURIComponent(projectId)}`;
+  try {
+    const resources = ["papers", "evidence", "claims"];
+    const payloads = await Promise.all(resources.map(async (resource) => {
+      const response = await fetch(`${base}/${resource}?limit=200&offset=0`);
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(researchErrorMessage(data, response.status));
+      if (!Array.isArray(data.items)) throw new Error(`${resource} 列表格式无效`);
+      return data.items;
+    }));
+    if (version !== state.research.projectLoadVersion) return false;
+    state.research.selectedProjectId = projectId;
+    [state.research.papers, state.research.evidence, state.research.claims] = payloads;
+    renderResearchSidebar();
+    renderResourceWorkspace();
+    setResourceFeedback("", "");
+    return true;
+  } catch (error) {
+    if (version === state.research.projectLoadVersion) {
+      renderResearchSidebar();
+      renderResourceWorkspace();
+      setResourceFeedback("error", "项目资料读取失败，已保留当前项目：" + error.message);
+    }
+    return false;
+  }
+}
+
+async function importResearchArxiv() {
+  const input = $("#research-arxiv-id");
+  const scope = $("#research-import-scope");
+  const projectId = state.research.selectedProjectId;
+  if (!input || !scope || !projectId) return false;
+  const arxivId = input.value.trim();
+  if (!arxivId) {
+    setResourceFeedback("error", "请输入带 vN 的精确 arXiv ID。");
+    return false;
+  }
+  input.disabled = scope.disabled = true;
+  try {
+    const suffix = scope.value === "full_text" ? "/full-text" : "";
+    const response = await fetch(
+      `/api/research/projects/${encodeURIComponent(projectId)}/papers/import/arxiv${suffix}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arxiv_id: arxivId }),
+      },
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(researchErrorMessage(data, response.status));
+    input.value = "";
+    const refreshed = await loadResearchProject(projectId);
+    setResourceFeedback(refreshed ? "success" : "error", refreshed
+      ? `已导入 ${arxivId}，项目资料已刷新。`
+      : `已导入 ${arxivId}，但项目资料刷新失败。`);
+    return refreshed;
+  } catch (error) {
+    setResourceFeedback("error", "导入失败；ID 已保留，可直接重试：" + error.message);
+    return false;
+  } finally {
+    input.disabled = scope.disabled = false;
+  }
 }
 
 function collectLoadedSearchEntities() {
@@ -4801,6 +5061,7 @@ function bindEvents() {
   });
   newBtns.forEach((newBtn) => newBtn.addEventListener("click", newSession));
   $("#refresh-sessions")?.addEventListener("click", loadSessions);
+  $("#refresh-research-projects")?.addEventListener("click", loadResearchProjects);
   $$("[data-session-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       state.sessionFilter = button.dataset.sessionFilter || "recent";

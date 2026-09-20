@@ -187,12 +187,91 @@ def test_sidebar_offers_an_accessible_refresh_action():
 def test_compact_navigation_keeps_accessible_names_and_mobile_labels():
     page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
     buttons = re.findall(r'<button class="rail-item[^>]*>', page)
-    assert len(buttons) == 8
+    assert len(buttons) == 9
     assert all('aria-label="' in button for button in buttons), "icon-only navigation needs persistent names"
     style = (ROOT / "app/static/style.css").read_text(encoding="utf-8")
     mobile = style.split("@media (max-width: 719px)", 1)[1]
     labels = mobile.split(".rail-item > span:nth-child(2)", 1)[1].split("}", 1)[0]
     assert "display: none" not in labels, "mobile navigation should identify destinations visually"
+
+
+def test_research_workspace_exposes_library_evidence_and_recoverable_import():
+    page = (ROOT / "app/static/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "app/static/app.js").read_text(encoding="utf-8")
+    style = (ROOT / "app/static/style.css").read_text(encoding="utf-8")
+
+    assert 'data-primary-view="research"' in page
+    assert 'id="research-project-list"' in page
+    assert 'id="refresh-research-projects"' in page
+    assert 'research: ["Research"' in script
+    assert "async function loadResearchProjects()" in script
+    assert "async function loadResearchProject(projectId)" in script
+    assert "async function importResearchArxiv" in script
+    assert "/exports/comparison.csv" in script
+    assert "/exports/references.bib" in script
+    assert 'appendResourceSection(content, "Library"' in script
+    assert 'appendResourceSection(content, "Evidence Inspector"' in script
+    assert ".research-import-form" in style
+    assert ".research-evidence-quote" in style
+
+
+def test_entering_research_view_triggers_project_loading_only_from_navigation():
+    script = (ROOT / "app/static/app.js").read_text(encoding="utf-8")
+    navigation = script.split("function setPrimaryView(view)", 1)[1].split(
+        "function focusPrimaryWorkspace", 1
+    )[0]
+    settings = script.split("function applyRuntimeSettings(payload)", 1)[1].split(
+        "async function loadRuntimeSettings", 1
+    )[0]
+    trigger = 'if (view === "research") void loadResearchProjects();'
+    assert trigger in navigation
+    assert trigger not in settings
+
+
+def test_failed_research_refresh_preserves_loaded_projects():
+    run_js('''
+state.research.projects = [{project_id: "existing", title: "Existing"}];
+sandbox.fetch = async () => response(503, {detail: "research unavailable"});
+await vm.runInContext("loadResearchProjects()", sandbox);
+assert.strictEqual(state.research.projects.length, 1);
+assert.strictEqual(state.research.projects[0].project_id, "existing");
+''')
+
+
+def test_research_project_selection_commits_only_after_all_records_load():
+    run_js('''
+state.research.selectedProjectId = "existing";
+state.research.papers = [{paper_version_id: "keep"}];
+state.research.evidence = [{evidence_id: "keep"}];
+state.research.claims = [{claim_id: "keep"}];
+sandbox.fetch = async url => {
+  if (url.includes("/evidence?")) return response(503, {detail: "evidence unavailable"});
+  return response(200, {items: []});
+};
+await vm.runInContext('loadResearchProject("next")', sandbox);
+assert.strictEqual(state.research.selectedProjectId, "existing");
+assert.strictEqual(state.research.papers[0].paper_version_id, "keep");
+assert.strictEqual(state.research.evidence[0].evidence_id, "keep");
+assert.strictEqual(state.research.claims[0].claim_id, "keep");
+''')
+
+
+def test_failed_research_import_keeps_exact_version_for_retry():
+    run_js('''
+const input = {value: "1707.06347v2", disabled: false};
+const scope = {value: "abstract", disabled: false};
+const query = sandbox.document.querySelector;
+sandbox.document.querySelector = selector => ({
+  "#research-arxiv-id": input,
+  "#research-import-scope": scope,
+}[selector] || query(selector));
+state.research.selectedProjectId = "project_one";
+sandbox.fetch = async () => response(503, {detail: "upstream unavailable"});
+await vm.runInContext("importResearchArxiv()", sandbox);
+assert.strictEqual(input.value, "1707.06347v2", "failed import must remain retryable");
+assert.strictEqual(input.disabled, false);
+assert.strictEqual(scope.disabled, false);
+''')
 
 
 def test_late_session_list_response_cannot_overwrite_a_newer_refresh():

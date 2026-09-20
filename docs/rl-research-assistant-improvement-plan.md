@@ -4,7 +4,7 @@
 
 代码基线：`78a1848`（Redis Stream 迁移已合入 main）
 
-文档状态：分阶段实施中。第 18 节的首个 M0/R01 切片已实现项目、资料快照、论文版本、证据、待核验主张与报告 API；M1 已把这些能力接入 Web Agent 的 18 个项目工具，并交付结构化 arXiv 搜索、精确版本摘要、受控 PDF 快照、持久查询/混合检索、比较 CSV/BibTeX、fixed 10/30 工程门槛和一个通过的 DeepSeek 非 PPO 真实任务。使用方式和验收范围见 [科研基础说明](rl-research-foundation.md)。科研 UI、实验与训练模块仍是后续设计，不能视为已交付能力。
+文档状态：分阶段实施中。第 18 节的首个 M0/R01 切片已实现项目、资料快照、论文版本、证据、待核验主张与报告 API；M1 已把这些能力接入 Web Agent 的 18 个项目工具，并交付结构化 arXiv 搜索、精确版本摘要、受控 PDF 快照、持久查询/混合检索、比较 CSV/BibTeX、Library/Evidence Inspector 最小界面、fixed 10/30 工程门槛和一个通过的 DeepSeek 非 PPO 真实任务。使用方式和验收范围见 [科研基础说明](rl-research-foundation.md)。实验协议、统计与训练模块仍是后续设计，不能视为已交付能力。
 
 产品方向是 **通用 Agent + 可复用的强化学习科研能力**。用户选择的 **PPO 单智能体复现与实验分析** 仅是首个验收样例，不是产品定位或后续研究范围。当前样例只包含公开论文元数据、摘要短摘录与合成指标，训练、实验协议管理和统计分析尚未执行或实现。
 
@@ -642,7 +642,7 @@ MLflow 能记录参数、指标和工件，可作为外部跟踪系统；科研�
 
 ### M1：论文库与可追溯证据（6–9 人日）
 
-进度（2026-09-20）：工具接入、R02 结构化元数据/摘要、R03 受控 arXiv PDF 快照、SQLite v2 持久查询/混合检索及项目级比较 CSV/BibTeX 导出已实现，参见 [Web 聊天科研工具](rl-research-foundation.md#research-chat-tools)。精确版本复核、摘要保留、受限 PDF 校验、物理页读取、项目隔离、embedding 缓存/降级和 researcher 白名单均有离线契约；Docker 已验证真实 1024 维 embedding、两篇项目论文排序、重复查询缓存和重启后历史。fixed 10/30 工程集和 DeepSeek 非 PPO 任务也已通过。固定任务工具白名单把总 token 从 59,893 降至 18,143。专用 UI、多任务人工语义评测和 PDF 分块索引仍未完成，不能将整个 M1 标为完成。
+进度（2026-09-20）：工具接入、R02 结构化元数据/摘要、R03 受控 arXiv PDF 快照、SQLite v2 持久查询/混合检索、项目级比较 CSV/BibTeX 导出及 Library/Evidence Inspector 最小界面已实现，参见 [Web 聊天科研工具](rl-research-foundation.md#research-chat-tools)。精确版本复核、摘要保留、受限 PDF 校验、物理页读取、项目隔离、embedding 缓存/降级和 researcher 白名单均有离线契约；Docker 已验证真实 1024 维 embedding、两篇项目论文排序、重复查询缓存和重启后历史。fixed 10/30 工程集和 DeepSeek 非 PPO 任务也已通过。固定任务工具白名单把总 token 从 59,893 降至 18,143。多任务人工语义评测和 PDF 分块索引仍未完成，不能将整个 M1 标为完成。
 
 任务：
 
@@ -893,7 +893,7 @@ MVP 建议限制同一项目并发运行、checkpoint 数量、单任务输出�
 
 ## 18. 下一次开发的直接起点
 
-**当前接续点：完成 M1 Library/Evidence Inspector。** M0/R01 骨架、18 个 Web Agent 工具、R02/R03 文献导入、SQLite v2 持久查询与混合检索、比较 CSV/BibTeX 导出、synthetic 10/30 门槛和 DeepSeek 非 PPO 任务已经落地。固定验收运行通过四工具白名单把 token 降低约 69.7%；多任务真实评测仍需单独扩展。独立 Redis Worker 尚未注入科研工具服务；Web researcher 档案已可使用项目科研工具。
+**当前接续点：进入 R04 方法卡与 ExperimentSpec 校验。** M0/R01 骨架、18 个 Web Agent 工具、R02/R03 文献导入、SQLite v2 持久查询与混合检索、比较 CSV/BibTeX 导出、Library/Evidence Inspector 最小界面、synthetic 10/30 门槛和 DeepSeek 非 PPO 任务已经落地。固定验收运行通过四工具白名单把 token 降低约 69.7%；多任务真实评测仍需单独扩展。独立 Redis Worker 尚未注入科研工具服务；Web researcher 档案已可使用项目科研工具。
 
 原首个切片目标保留如下，作为已交付骨架的追溯清单：
 

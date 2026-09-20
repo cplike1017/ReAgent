@@ -70,6 +70,17 @@ def test_tablet_and_mobile_drop_splitters_and_keep_resource_workspace_usable(tmp
     assert ".icon-btn.mobile-nav-toggle { display: inline-grid;" in tablet_rules
 
 
+def test_research_import_form_fits_between_open_desktop_panes(tmp_path):
+    """The research form must not push exports or submit controls outside the center pane."""
+    with TestClient(_make_app(tmp_path)) as client:
+        style = client.get("/style.css").text
+
+    form = style.split(".research-import-form {", 1)[1].split("}", 1)[0]
+    intro = style.split(".research-import-form > div {", 1)[1].split("}", 1)[0]
+    assert "grid-template-columns: minmax(0, 1fr) minmax(130px, .55fr) auto" in form
+    assert "grid-column: 1 / -1" in intro
+
+
 def test_desktop_hides_the_compact_navigation_toggle(tmp_path):
     """The generic icon-button display rule must not override desktop hiding."""
     with TestClient(_make_app(tmp_path)) as client:
