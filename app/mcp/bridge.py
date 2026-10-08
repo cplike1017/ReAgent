@@ -103,6 +103,9 @@ class MCPBridge:
                 if server_name not in (description or ""):
                     description = f"[MCP:{server_name}] {description}"
 
+                annotations = schema.get("annotations") or {}
+                read_only = annotations.get("readOnlyHint") is True
+
                 async def _proxy(srv=server_name, tname=tool_name, **kwargs):
                     # 过滤 None 参数：可选字段未填时传 None 会被严格 server 拒绝
                     clean = {k: v for k, v in kwargs.items() if v is not None}
@@ -117,6 +120,8 @@ class MCPBridge:
                         timeout_seconds=self.client.settings.mcp_tool_timeout_seconds,
                         # 风险等级：默认走配置（暂为 low 全放行，等待 HITL/LLM 评估）
                         risk_level=self.client.settings.tool_default_risk_level,
+                        side_effects=not read_only,
+                        idempotent=read_only or annotations.get("idempotentHint") is True,
                     ),
                 )
                 self.registered.append(full_name)

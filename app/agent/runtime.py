@@ -17,6 +17,7 @@ AgentRuntime（第一~六阶段完整版）。
     resume() 从最新 Checkpoint 恢复状态后调用 _run_with_state() 继续，
     绝不重新从用户输入完整执行 —— 这是"真恢复"与"假恢复"的区别。
 """
+import hashlib
 import json
 from uuid import uuid4
 
@@ -34,6 +35,7 @@ from app.llm.client import BaseLLMClient, LLMResponse, ToolCallRequest, create_l
 from app.memory.store import MemoryStore
 from app.tools.builtin import build_default_registry
 from app.tools.gateway import ToolGateway
+from app.tools.context import current_tool_context
 from app.tools.registry import ToolRegistry
 from app.tools.schemas import ToolResult, UserContext
 from app.tracing.context import current_trace_id
@@ -98,6 +100,7 @@ class AgentRuntime:
         self._last_checkpoint: CheckpointRecord | None = None
         self._extra_hooks: LoopHooks | None = None
         self._current_user: UserContext | None = None
+        self._current_tool_call: dict | None = None
 
     # ------------------------------------------------------------------
     # 工具执行入口：走 Tool Gateway（含 tool_gateway / tool.execute Span）
@@ -108,12 +111,30 @@ class AgentRuntime:
         args: dict,
         on_retry: ToolRetryHook | None = None,
     ) -> ToolResult:
-        return await self.tool_gateway.execute(
-            name,
-            args,
-            user=self._current_user,
-            on_retry=on_retry,
-        )
+        call = self._current_tool_call or {}
+        context = {
+            "session_id": self._state.session_id if self._state else "",
+            "turn_id": (self._state.invocation_turn_id or self._state.turn_id) if self._state else "",
+            "tool_call_id": call.get("id", ""),
+        }
+        inherited = {**context, "invocation_key": call.get("invocation_key"),
+                     "user": self._current_user, "on_approval": self._on_approval}
+        token = current_tool_context.set(inherited)
+        try:
+            return await self.tool_gateway.execute(
+                name, args, user=self._current_user, on_retry=on_retry,
+                invocation_key=call.get("invocation_key"), context=context,
+                on_approval=self._on_approval,
+            )
+        finally:
+            current_tool_context.reset(token)
+
+    async def _on_approval(self, record: dict) -> None:
+        if self._extra_hooks:
+            hook = (self._extra_hooks.approval_requested if record["status"] == "pending"
+                    else self._extra_hooks.approval_resolved)
+            if hook:
+                await hook(record)
 
     # ------------------------------------------------------------------
     # LLM 调用入口：包上 llm_call Span（记录 model / tokens / finish_reason）
@@ -213,9 +234,16 @@ class AgentRuntime:
         state = self._state
         if response.tool_calls:
             state.status = "PENDING_TOOL"
-            state.pending_tool_calls = [
-                {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in response.tool_calls
-            ]
+            state.pending_tool_calls = []
+            state.invocation_turn_id = state.invocation_turn_id or state.turn_id
+            for tc in response.tool_calls:
+                state.tool_call_sequence += 1
+                identity = json.dumps([state.session_id, state.invocation_turn_id,
+                                       state.tool_call_sequence], ensure_ascii=False)
+                state.pending_tool_calls.append({
+                    "id": tc.id, "name": tc.name, "arguments": tc.arguments,
+                    "invocation_key": "tool_" + hashlib.sha256(identity.encode()).hexdigest(),
+                })
         else:
             state.status = "RUNNING"
             state.pending_tool_calls = []
@@ -241,16 +269,23 @@ class AgentRuntime:
 
     async def _hook_before_tool(self, tc, step: int) -> None:
         """工具开始前：把真实的开始时机暴露给外部观察钩子。"""
+        self._current_tool_call = next(
+            (p for p in self._state.pending_tool_calls if p["id"] == tc.id), None
+        )
         if self._extra_hooks and self._extra_hooks.before_tool:
             await self._extra_hooks.before_tool(tc, step)
 
     async def _hook_after_tool(self, tc, envelope: ToolResult, step: int) -> None:
         """工具执行后：状态回到 RUNNING，保存检查点。"""
         state = self._state
-        state.status = "RUNNING"
-        state.pending_tool_calls = []
+        for index, pending in enumerate(state.pending_tool_calls):
+            if pending["id"] == tc.id:
+                state.pending_tool_calls.pop(index)
+                break
+        state.status = "PENDING_TOOL" if state.pending_tool_calls else "RUNNING"
         state.last_tool_result = envelope.model_dump(mode="json")
         await self._persist_and_checkpoint(state, state.messages, "after_tool")
+        self._current_tool_call = None
         if self._extra_hooks and self._extra_hooks.after_tool:
             await self._extra_hooks.after_tool(tc, envelope, step)
 
@@ -297,12 +332,13 @@ class AgentRuntime:
 
     async def _forward_plan_step_before_llm(self, step: int, messages: list[dict]) -> None:
         """转发隔离子步骤的模型开始事件，不把临时 messages 持久化进主会话。"""
+        self._state.plan_step_messages = messages
+        await self._persist_and_checkpoint(self._state, self._state.messages, "plan_step_before_llm")
         if self._extra_hooks and self._extra_hooks.before_llm:
             await self._extra_hooks.before_llm(step, messages)
 
     async def _forward_plan_step_after_decision(self, response, step: int) -> None:
-        if self._extra_hooks and self._extra_hooks.after_decision:
-            await self._extra_hooks.after_decision(response, step)
+        await self._hook_after_decision(response, step)
 
     async def _forward_plan_step_llm_retry(
         self,
@@ -321,12 +357,10 @@ class AgentRuntime:
             await self._extra_hooks.llm_failed(step, error)
 
     async def _forward_plan_step_before_tool(self, tool_call, step: int) -> None:
-        if self._extra_hooks and self._extra_hooks.before_tool:
-            await self._extra_hooks.before_tool(tool_call, step)
+        await self._hook_before_tool(tool_call, step)
 
     async def _forward_plan_step_after_tool(self, tool_call, envelope: ToolResult, step: int) -> None:
-        if self._extra_hooks and self._extra_hooks.after_tool:
-            await self._extra_hooks.after_tool(tool_call, envelope, step)
+        await self._hook_after_tool(tool_call, envelope, step)
 
     async def _forward_plan_step_tool_retry(
         self,
@@ -362,6 +396,9 @@ class AgentRuntime:
         state = self._state
         if state is not None:
             state.plan = plan
+            state.plan_task = task
+            state.plan_step_id = ""
+            state.plan_step_messages = []
             state.plan_revisions = max(0, plan_version - 1)
             state.status = "RUNNING"
             await self._persist_and_checkpoint(state, state.messages, "plan_created")
@@ -380,6 +417,9 @@ class AgentRuntime:
     async def _hook_plan_step_started(self, step, plan_version: int, total: int) -> None:
         state = self._state
         if state is not None:
+            if state.plan_step_id != step.step_id:
+                state.plan_step_messages = []
+            state.plan_step_id = step.step_id
             state.step = step.order + 1
             state.status = "RUNNING"
             await self._persist_and_checkpoint(state, state.messages, "plan_step_started")
@@ -421,6 +461,10 @@ class AgentRuntime:
         state = self._state
         if state is not None:
             state.plan_revisions = max(0, next_version - 1)
+            state.plan = []
+            state.plan_step_messages = []
+            state.plan_step_id = ""
+            state.plan_task = decision.revised_task or state.plan_task
             state.status = "RUNNING"
             await self._persist_and_checkpoint(state, state.messages, "plan_revised")
         if self._extra_hooks and self._extra_hooks.plan_revised:
@@ -539,7 +583,7 @@ class AgentRuntime:
         retrieved_docs: list[str] | None,
     ) -> tuple[list[PlanStep], str, list[ToolCallRequest], int]:
         """计划模式主循环：Planner 出计划 → PlanExecutor 执行 → Reflector 反思。"""
-        task = _last_user_text(messages) or ""
+        task = state.plan_task or _last_user_text(messages) or ""
         tool_names = [t.name for t in self.registry.all()]
         planner = Planner(self.settings, llm=self.llm, tool_names=tool_names)
         reflector = Reflector(max_revisions=self.settings.max_plan_revisions)
@@ -556,7 +600,9 @@ class AgentRuntime:
 
         all_tool_calls: list[ToolCallRequest] = []
         plan: list[PlanStep] = []
-        revisions = 0
+        revisions = state.plan_revisions
+        existing_plan = state.plan or None
+        resume_step_messages = state.plan_step_messages or None
         current_task = task
         final_answer = ""
 
@@ -576,7 +622,11 @@ class AgentRuntime:
                 turn_messages,
                 memory_context,
                 plan_version=plan_version,
+                existing_plan=existing_plan,
+                resume_step_messages=resume_step_messages,
             )
+            existing_plan = None
+            resume_step_messages = None
             all_tool_calls.extend(calls)
             final_answer = answer
 
@@ -759,39 +809,69 @@ class AgentRuntime:
 
         # 从检查点反序列化状态 —— 状态来自 Checkpoint，而非用户输入
         state = AgentState(**checkpoint.state)
+        state.invocation_turn_id = state.invocation_turn_id or checkpoint.turn_id
         state.turn_id = turn_id or state.turn_id
+        self._state = state
+        self._current_tool_call = None
         messages = state.messages
-        self._persisted = len(messages)  # 已持久化的消息数（恢复后新增的消息从这里开始写）
+        self._persisted = len(_truncate_incomplete_tool_block(messages))
+        if state.status == "DONE":
+            answer = next((m.get("content") or "" for m in reversed(messages)
+                           if m["role"] == "assistant" and not m.get("tool_calls")), "")
+            return AgentTurnResult(
+                session_id=state.session_id, turn_id=state.turn_id, answer=answer,
+                steps=state.step, messages=messages, checkpoint_id=checkpoint.checkpoint_id,
+                trace_id=current_trace_id.get(), plan=state.plan, plan_revisions=state.plan_revisions,
+            )
 
         # 恢复 PENDING_TOOL：重新执行待办工具调用
         resumed_calls: list[ToolCallRequest] = []
         if state.status == "PENDING_TOOL" and state.pending_tool_calls:
+            if state.agent_mode == "plan" and state.plan and state.plan_step_messages:
+                messages = state.plan_step_messages
             pending = list(state.pending_tool_calls)
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": p["id"],
-                            "type": "function",
-                            "function": {"name": p["name"], "arguments": json.dumps(p["arguments"], ensure_ascii=False)},
-                        }
-                        for p in pending
-                    ],
-                }
-            )
+            # Older checkpoints acquire a stable identity before any replay.
+            for index, p in enumerate(pending):
+                if not p.get("invocation_key"):
+                    identity = json.dumps([state.session_id, state.invocation_turn_id,
+                                           checkpoint.checkpoint_id, index, p["id"]])
+                    p["invocation_key"] = "tool_" + hashlib.sha256(identity.encode()).hexdigest()
+            declaration_index = next((i for i in range(len(messages) - 1, -1, -1)
+                                      if messages[i].get("tool_calls")), None)
+            declared = messages[declaration_index] if declaration_index is not None else None
+            declared_ids = {c["id"] for c in declared["tool_calls"]} if declared else set()
+            completed_ids = {m.get("tool_call_id") for m in messages[(declaration_index or 0) + 1:]
+                             if m["role"] == "tool"}
+            if not all(p["id"] in declared_ids and p["id"] not in completed_ids for p in pending):
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": p["id"],
+                                "type": "function",
+                                "function": {"name": p["name"], "arguments": json.dumps(p["arguments"], ensure_ascii=False)},
+                            }
+                            for p in pending
+                        ],
+                    }
+                )
+            await self._persist_and_checkpoint(state, state.messages, "before_resume_tools")
             for p in pending:
                 # 恢复执行的工具调用同样计入回合结果（Eval 依赖）
-                resumed_calls.append(ToolCallRequest(id=p["id"], name=p["name"], arguments=p["arguments"]))
+                call = ToolCallRequest(id=p["id"], name=p["name"], arguments=p["arguments"])
+                resumed_calls.append(call)
+                await self._hook_before_tool(call, state.step)
                 envelope = await self._execute_tool(p["name"], p["arguments"])
                 messages.append(
                     {"role": "tool", "tool_call_id": p["id"], "name": p["name"], "content": envelope.to_json()}
                 )
+                await self._hook_after_tool(call, envelope, state.step)
             state.status = "RUNNING"
             state.pending_tool_calls = []
             # 恢复后的新状态也保存一个检查点（版本继续递增）
-            await self._persist_and_checkpoint(state, messages, "resume")
+            await self._persist_and_checkpoint(state, state.messages, "resume")
 
         result = await self._run_with_state(state)
         if resumed_calls:

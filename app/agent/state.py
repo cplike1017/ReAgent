@@ -14,8 +14,8 @@ class AgentState(BaseModel):
         FAILED       执行失败
 
     pending_tool_calls 保存"LLM 决策但尚未执行"的工具调用；
-    从 PENDING_TOOL 恢复时，需要重新执行这些调用 ——
-    这正是"Retry 可能导致 Tool 重复执行"的根源（教学点）。
+    从 PENDING_TOOL 恢复时，沿用已保存的 invocation_key 通过网关查询结果；
+    已完成的调用复用信封，执行中或结果未知的调用拒绝自动重放。
 
     Stage 9 规划层：plan 保存当前计划与每步状态（Checkpoint 一并持久化，
     崩溃恢复后计划不丢失）；plan_revisions 记录反思触发的重规划次数。
@@ -23,6 +23,8 @@ class AgentState(BaseModel):
 
     session_id: str
     turn_id: str
+    invocation_turn_id: str = ""
+    tool_call_sequence: int = 0
     step: int = 0
     status: str = "RUNNING"  # RUNNING | PENDING_TOOL | DONE | FAILED
     messages: list[dict] = Field(default_factory=list, description="当前消息序列（OpenAI 风格）")
@@ -33,4 +35,7 @@ class AgentState(BaseModel):
     # ---- Stage 9 规划层 ----
     plan: list[PlanStep] = Field(default_factory=list, description="当前计划（plan 模式）")
     plan_revisions: int = Field(default=0, description="反思触发的重规划次数")
+    plan_step_messages: list[dict] = Field(default_factory=list)
+    plan_step_id: str = ""
+    plan_task: str = ""
     agent_mode: str = Field(default="react", description="react | plan（本回合执行模式）")

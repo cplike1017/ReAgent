@@ -36,6 +36,9 @@ class ToolDefinition:
     output_model: type[BaseModel] | None = None
     # 注册时补充的元信息
     extra: dict = field(default_factory=dict)
+    # Side effects require an explicit retry guarantee; existing read-only tools are safe.
+    side_effects: bool = False
+    idempotent: bool = False
 
     def input_schema(self) -> dict:
         """生成 JSON Schema（OpenAI function calling 的 parameters 字段）。"""

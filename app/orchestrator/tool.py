@@ -64,4 +64,6 @@ def build_delegate_tool(orchestrator: OrchestratorRunner) -> ToolDefinition:
         handler=handler,
         timeout_seconds=TOOL_TIMEOUT_SECONDS,
         risk_level="low",
+        side_effects=True,
+        idempotent=False,
     )

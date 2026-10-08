@@ -361,6 +361,12 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
                 },
             )
 
+        async def _hook_approval_requested(record: dict) -> None:
+            await _emit("approval.requested", record)
+
+        async def _hook_approval_resolved(record: dict) -> None:
+            await _emit("approval.resolved", record)
+
         def _retry_error_payload(error) -> dict:
             if hasattr(error, "model_dump"):
                 return error.model_dump(mode="json")
@@ -821,6 +827,8 @@ async def web_chat_stream(req: WebChatRequest, request: Request) -> StreamingRes
             before_tool=_hook_before_tool,
             after_tool=_hook_after_tool,
             tool_retry_scheduled=_hook_tool_retry_scheduled,
+            approval_requested=_hook_approval_requested,
+            approval_resolved=_hook_approval_resolved,
             before_final=_hook_before_final,
             context_built=_hook_context_built,
             memory_retrieved=_hook_memory_retrieved,

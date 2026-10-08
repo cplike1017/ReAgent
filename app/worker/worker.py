@@ -33,13 +33,22 @@ from app.queue.consumer import process_job
 from app.queue.producer import RedisJobQueue
 from app.session.repository import SQLiteSessionRepository
 from app.tools.builtin import build_default_registry
+from app.tools.approvals import ToolApprovalService
+from app.tools.gateway import ToolGateway
+from app.tools.invocations import SQLiteToolInvocationRepository
 from app.tracing.recorder import TraceRecorder
 
 
 def build_runtime_factory(settings: Settings, recorder: TraceRecorder | None = None):
-    """返回 () -> AgentRuntime 的工厂：每个 Job 共享同一 SQLite。"""
+    """返回 () -> AgentRuntime 的工厂；共享持久化资源由 factory.close 释放。"""
     session_repo = SQLiteSessionRepository(settings.database_url)
     checkpoint_repo = SQLiteCheckpointRepository(settings.database_url)
+    invocation_repo = SQLiteToolInvocationRepository(settings.database_url)
+    approval_service = ToolApprovalService(
+        settings.database_url,
+        timeout_seconds=settings.tool_approval_timeout_seconds,
+        poll_seconds=settings.tool_approval_poll_seconds,
+    )
     profile_registry = ProfileRegistry(settings) if settings.orchestrator_enabled else None
     orchestration_repo = (
         SQLiteOrchestrationRepository(settings.database_url)
@@ -63,6 +72,10 @@ def build_runtime_factory(settings: Settings, recorder: TraceRecorder | None = N
         return AgentRuntime(
             llm=llm,
             registry=registry,
+            tool_gateway=ToolGateway(
+                registry, settings=settings, recorder=recorder,
+                invocation_repo=invocation_repo, approval_service=approval_service,
+            ),
             settings=settings,
             session_repo=session_repo,
             checkpoint_repo=checkpoint_repo,
@@ -70,6 +83,22 @@ def build_runtime_factory(settings: Settings, recorder: TraceRecorder | None = N
             orchestrator=orchestrator,
         )
 
+    closed = False
+
+    def close() -> None:
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        invocation_repo.close()
+        approval_service.close()
+        checkpoint_repo.close()
+        session_repo.close()
+        if orchestration_repo is not None:
+            orchestration_repo.close()
+
+    factory.close = close
+    factory.owns_runtime = True
     return factory
 
 
@@ -151,6 +180,7 @@ async def run_worker(
                     flush=True,
                 )
     finally:
+        runtime_factory.close()
         if owns_redis:
             await redis.aclose()
         print(f"[{worker_id}] 已退出", flush=True)

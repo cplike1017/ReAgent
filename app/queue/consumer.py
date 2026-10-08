@@ -5,11 +5,12 @@
     max_attempts 默认 3。每次失败 attempt += 1 并重新入队；
     达到上限后标记 FAILED —— 避免无限重试。
 
-Redis Job 终态与 ACK 在同一事务提交；外部工具副作用仍需工具自身支持幂等键。
+Redis Job 终态与 ACK 在同一事务提交；重投使用同一回合检查点和工具调用标识。
 """
 import asyncio
 from typing import Awaitable, Callable
 
+from app.agent.runtime import AgentRuntime
 from app.errors import error_to_dict
 from app.queue.models import Job, JobStatus, StreamDelivery
 from app.queue.producer import RedisJobQueue
@@ -20,6 +21,26 @@ from app.tracing.span import trace_span
 
 # 运行时工厂：() -> AgentRuntime（由 Worker 提供，负责组装 Session/Checkpoint 等依赖）
 RuntimeFactory = Callable[[], Awaitable]
+
+
+async def _execute_job(runtime, job: Job, message: str, user: UserContext | None):
+    """恢复同一 Job 的快照；另一 Job 的会话快照不能用于本次恢复。"""
+    if not isinstance(runtime, AgentRuntime):
+        # 注入的轻量运行时仍按原有接口执行。
+        return await runtime.run(message, session_id=job.session_id, user=user)
+    session_id = job.session_id or f"session_{job.job_id}"
+    checkpoint = (
+        runtime.checkpoint_repo.load_latest_for_turn(session_id, job.job_id)
+        if runtime.checkpoint_repo is not None
+        else None
+    )
+    if checkpoint is not None:
+        return await runtime.resume(
+            session_id, checkpoint_id=checkpoint.checkpoint_id, user=user,
+        )
+    return await runtime.run(
+        message, session_id=session_id, turn_id=job.job_id, user=user,
+    )
 
 
 async def _heartbeat_delivery(
@@ -70,6 +91,7 @@ async def process_job(
     old_trace, old_span = current_trace_id.get(), current_span_id.get()
     ctx = job.trace_context or {}
     set_trace_context(ctx.get("trace_id"), ctx.get("parent_span_id"))
+    runtime = None
     try:
         message = (job.input or {}).get("message", "")
         # 从 Job 恢复调用方身份（Stage 5 权限校验用）
@@ -85,14 +107,14 @@ async def process_job(
                 attributes={"job_id": job.job_id, "attempt": job.attempt},
                 recorder=recorder,
             ) as span:
-                result = await runtime.run(message, session_id=job.session_id, user=user)
+                result = await _execute_job(runtime, job, message, user)
                 span.output = {
                     "session_id": result.session_id,
                     "steps": result.steps,
                     "tool_calls": len(result.tool_calls),
                 }
         else:
-            result = await runtime.run(message, session_id=job.session_id, user=user)
+            result = await _execute_job(runtime, job, message, user)
 
         payload = {
             "answer": result.answer,
@@ -125,7 +147,18 @@ async def process_job(
             error=error,
         )
     finally:
-        await stop_heartbeat()
-        # 恢复调用前的 Trace 上下文，避免污染下一个 Job
-        current_trace_id.set(old_trace)
-        current_span_id.set(old_span)
+        try:
+            await stop_heartbeat()
+        finally:
+            try:
+                if runtime is not None and getattr(runtime_factory, "owns_runtime", False):
+                    try:
+                        runtime.tool_gateway.close()
+                    finally:
+                        close_llm = getattr(runtime.llm, "aclose", None)
+                        if close_llm is not None:
+                            await close_llm()
+            finally:
+                # 恢复调用前的 Trace 上下文，避免污染下一个 Job
+                current_trace_id.set(old_trace)
+                current_span_id.set(old_span)

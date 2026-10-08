@@ -1,4 +1,4 @@
-/* ReAgent Web UI 前端逻辑 v32 */
+/* ReAgent Web UI 前端逻辑 v33 */
 "use strict";
 
 const state = {
@@ -8,6 +8,9 @@ const state = {
   streaming: false,
   abortCtrl: null, // 当前 SSE 的 AbortController（用于停止）
   executionId: null,
+  executionTurnId: null,
+  approvals: new Map(),
+  approvalError: "",
   executionQueuedAt: null,
   executionStartedAt: null,
   executionFinishedAt: null,
@@ -1044,10 +1047,13 @@ function startExecution(data) {
   advanceExecutionViewVersion();
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = data.execution_id || null;
+  state.executionTurnId = data.turn_id || null;
+  clearApprovals();
   setAgentMode(data.mode || state.agentMode);
   resetExecutionEventCursor();
   renderExecutionHistory(state.executionHistory);
   if (data.session_id) state.sessionId = data.session_id;
+  if (state.sessionId && state.executionTurnId) void loadPendingApprovals();
   state.executionQueuedAt = Date.now();
   state.executionStartedAt = null;
   state.executionFinishedAt = null;
@@ -2568,6 +2574,8 @@ function replayExecutionFrame(frame, viewVersion = state.executionViewVersion) {
 function replayExecution(record, events) {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionId = record.execution_id;
+  state.executionTurnId = record.turn_id || null;
+  clearApprovals();
   setAgentMode(record.agent_mode || state.agentMode);
   state.sessionId = record.session_id || state.sessionId;
   renderExecutionHistory(state.executionHistory);
@@ -2591,6 +2599,7 @@ function replayExecution(record, events) {
   updateExecutionStatus("running", "回放中", "正在还原已采集的执行事件");
 
   events.forEach((event) => replayExecutionEvent(event));
+  if (isActiveExecutionStatus(record.status)) void loadPendingApprovals();
   if (record.trace_id) void fetchExecutionTrace(record.trace_id, state.executionViewVersion);
   const status = record.status;
   if (status === "SUCCEEDED") finishExecution("success", "历史执行已完成");
@@ -2611,6 +2620,8 @@ function replayExecutionEvent(event) {
   const payload = event.payload || {};
   const timestamp = event.timestamp;
   const type = event.event_type;
+
+  if (applyApprovalLifecycleEvent(type, payload, { replay: true })) return;
 
   if (applyRuntimeLifecycleEvent(type, payload, timestamp) || applyOrchestrationLifecycleEvent(type, payload, timestamp) || applyPlanLifecycleEvent(type, payload, timestamp)) return;
 
@@ -3135,6 +3146,7 @@ async function openSession(sessionId) {
   if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
   loadOrchestrations(sessionId, viewVersion);
   loadExecutionHistory(sessionId, viewVersion);
+  void loadPendingApprovals(viewVersion);
 }
 
 /* ================= 编排记录（委派结果持久化） ================= */
@@ -3405,11 +3417,135 @@ function toolHistoryToCardData(message, declaredCall) {
   };
 }
 
+/* ================= 工具人工审批 ================= */
+function bindApprovalExecutionContext(data) {
+  if (!data.execution_id || data.execution_id !== state.executionId) return;
+  if (data.session_id) state.sessionId = data.session_id;
+  if (data.turn_id) state.executionTurnId = data.turn_id;
+}
+
+function clearApprovals() {
+  state.approvals.clear();
+  state.approvalError = "";
+  renderApprovals();
+}
+
+function upsertApproval(record, { actionable = false } = {}) {
+  if (!record || !record.approval_id || !record.target_hash) return;
+  const existing = state.approvals.get(record.approval_id);
+  // 已决定的请求只接受终态；旧 SSE 和晚到的 pending 查询都不能重新启用按钮。
+  if (existing && existing.status !== "pending" && record.status === "pending") return;
+  if (existing && existing.target_hash !== record.target_hash) return;
+  state.approvals.set(record.approval_id, {
+    ...existing, ...record,
+    actionable: record.status === "pending" && actionable,
+    busy: record.status === "pending" && Boolean(existing?.busy),
+  });
+  renderApprovals();
+}
+
+function isActionableApproval(record) {
+  if (!record || record.status !== "pending" || !record.actionable || record.busy) return false;
+  if (!record.context || record.context.session_id !== state.sessionId) return false;
+  if (state.executionTurnId && record.context.turn_id !== state.executionTurnId) return false;
+  const expires = Date.parse(record.expires_at);
+  return Number.isFinite(expires) && expires > Date.now();
+}
+
+function renderApprovals() {
+  const panel = $("#tool-approval-panel");
+  if (!panel) return;
+  const records = Array.from(state.approvals.values());
+  panel.hidden = records.length === 0 && !state.approvalError;
+  const labels = { pending: "等待人工审批", approved: "已批准", rejected: "已拒绝", expired: "已过期", cancelled: "已取消" };
+  panel.innerHTML = (state.approvalError ? `<p class="approval-error" role="alert">${esc(state.approvalError)}</p>` : "") + records.map(record => {
+    const enabled = isActionableApproval(record);
+    return `<article class="approval-card" data-approval-id="${esc(record.approval_id)}">
+      <div class="approval-heading"><strong>${esc(record.tool_name)}</strong><span>${esc(labels[record.status] || record.status)}</span></div>
+      <p>${esc(record.reason || "该工具调用需要人工审批")}</p>
+      <div class="approval-meta">策略：${esc(record.policy_name || "人工审批")} · 有效至 ${esc(record.expires_at ? new Date(record.expires_at).toLocaleString() : "未知")}</div>
+      <details open><summary>本次调用参数</summary><pre>${esc(formatJsonValue(record.arguments || {}))}</pre></details>
+      ${record.status === "pending" ? `<div class="approval-actions"><button type="button" data-approval-decision="rejected" ${enabled ? "" : "disabled"}>拒绝</button><button type="button" class="approval-approve" data-approval-decision="approved" ${enabled ? "" : "disabled"}>批准此次调用</button><span>${record.busy ? "正在提交…" : (!record.actionable ? "历史记录，正在核对当前状态" : "")}</span></div>` : ""}
+      ${record.decision_reason ? `<p class="approval-meta">${esc(record.decision_reason)}</p>` : ""}
+    </article>`;
+  }).join("");
+  panel.querySelectorAll("[data-approval-decision]").forEach(button => {
+    button.addEventListener("click", () => void submitApprovalDecision(button.closest("[data-approval-id]").dataset.approvalId, button.dataset.approvalDecision));
+  });
+}
+
+async function loadPendingApprovals(viewVersion = state.executionViewVersion) {
+  const sessionId = state.sessionId;
+  const turnId = state.executionTurnId;
+  if (!sessionId) return;
+  try {
+    const query = "?session_id=" + encodeURIComponent(sessionId) + "&status=pending"
+      + (turnId ? "&turn_id=" + encodeURIComponent(turnId) : "");
+    const response = await fetch("/api/web/approvals" + query);
+    const data = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId || state.executionTurnId !== turnId) return;
+    if (!response.ok) throw new Error(data.detail?.message || "HTTP " + String(response.status));
+    // 查询可能早于刚到达的请求事件；不能用旧快照禁用新的 live 请求。
+    (data.approvals || []).forEach(record => upsertApproval(record, { actionable: true }));
+    state.approvalError = "";
+    renderApprovals();
+  } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion) || state.sessionId !== sessionId) return;
+    state.approvalError = "读取人工审批失败：" + error.message;
+    renderApprovals();
+  }
+}
+
+async function submitApprovalDecision(approvalId, decision) {
+  const record = state.approvals.get(approvalId);
+  if (!isActionableApproval(record) || !["approved", "rejected"].includes(decision)) return;
+  const viewVersion = state.executionViewVersion;
+  record.busy = true;
+  state.approvalError = "";
+  renderApprovals();
+  try {
+    const response = await fetch("/api/web/approvals/" + encodeURIComponent(approvalId) + "/decision", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, target_hash: record.target_hash, actor: "local-user", reason: "" }),
+    });
+    const data = await response.json();
+    if (!isCurrentExecutionViewVersion(viewVersion)) return;
+    if (!response.ok) throw new Error(data.detail?.message || "HTTP " + String(response.status));
+    upsertApproval(data);
+  } catch (error) {
+    if (!isCurrentExecutionViewVersion(viewVersion)) return;
+    state.approvalError = "审批提交失败：" + error.message;
+    // 冲突或网络故障后重新读取服务端决定，避免把旧请求再次展示为可操作。
+    try {
+      const response = await fetch("/api/web/approvals/" + encodeURIComponent(approvalId));
+      if (response.ok && isCurrentExecutionViewVersion(viewVersion)) upsertApproval(await response.json(), { actionable: true });
+    } catch (_) { /* 保留原错误，下一次接续可重新读取 */ }
+  } finally {
+    if (isCurrentExecutionViewVersion(viewVersion)) {
+      const current = state.approvals.get(approvalId);
+      if (current) current.busy = false;
+      renderApprovals();
+    }
+  }
+}
+
+function applyApprovalLifecycleEvent(type, record, { replay = false } = {}) {
+  if (type !== "approval.requested" && type !== "approval.resolved") return false;
+  upsertApproval(record, { actionable: !replay && type === "approval.requested" });
+  appendExecutionEvent(record.status === "approved" ? "success" : "warning",
+    (type === "approval.requested" ? "工具等待人工审批：" : "工具审批已处理：") + String(record.tool_name || ""),
+    record.decision_reason || record.reason || "", record.timestamp);
+  if (!replay && record.status === "pending") updateExecutionStatus("pending", "等待人工审批", "请审核工具参数后批准或拒绝此次调用");
+  return true;
+}
+
 function resetExecutionPresentation() {
   if (state.executionTimer) window.clearInterval(state.executionTimer);
   state.executionTimer = null;
   state.abortCtrl = null;
   state.executionId = null;
+  state.executionTurnId = null;
+  clearApprovals();
   state.activeAssistantElement = null;
   resetExecutionEventCursor();
   state.executionQueuedAt = null;
@@ -4884,6 +5020,8 @@ function handleFrame(frame, contentEl, onComplete) {
     startExecution(data);
   }
   if (!registerExecutionEvent(data)) return;
+  if (event === "execution.queued" || event === "execution.started") bindApprovalExecutionContext(data);
+  if (applyApprovalLifecycleEvent(event, data)) return;
   if (applyRuntimeLifecycleEvent(event, data, data.timestamp) || applyOrchestrationLifecycleEvent(event, data, data.timestamp) || applyPlanLifecycleEvent(event, data, data.timestamp)) return;
 
   switch (event) {

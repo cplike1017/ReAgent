@@ -83,6 +83,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/agent.db"
     # 执行详情单条最大保留字节数；SSE 始终只发送更短的预览。
     execution_output_max_bytes: int = 262144
+    tool_approval_timeout_seconds: float = Field(default=300.0, gt=0)
+    tool_approval_poll_seconds: float = Field(default=0.1, gt=0)
 
     # ---------- Research foundation（本地单用户；默认关闭）----------
     research_enabled: bool = False
@@ -135,8 +137,8 @@ class Settings(BaseSettings):
     sandbox_dir: str = "./data/sandbox"
 
     # ---------- Policy（工具策略）----------
-    # 需要人工确认的风险等级（默认 high；当前无确认通道，命中即拒绝）
-    # 用户决定：暂设空（全部放行），后续引入 LLM 危险度评估后恢复
+    # 需要人工确认的风险等级；配置 high/medium 后由持久化 HITL 通道审批。
+    # 保留现有空默认值；未携带调用身份的直接 Gateway 调用仍按拒绝处理。
     policy_require_confirmation_risks: str = ""  # 逗号分隔，如 "high,medium"
     # 工具默认风险等级（MCP 外部工具注册时的默认值）
     tool_default_risk_level: str = "low"

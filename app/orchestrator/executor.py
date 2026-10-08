@@ -11,16 +11,20 @@
 工具过滤实现：从主 registry 中复制白名单内的 ToolDefinition 到新 registry，
 再为该 registry 建独立 ToolGateway —— 网关层（校验/权限/策略/超时）对子 agent 同样生效。
 """
+import hashlib
+import json
 import time
+from uuid import uuid4
 
 from app.agent.react_loop import LoopHooks, run_react_loop
 from app.config import Settings, get_settings
 from app.llm.client import BaseLLMClient
-from app.orchestrator.context import orchestration_depth
+from app.orchestrator.context import current_session_id, orchestration_depth
 from app.orchestrator.events import OrchestrationHooks, notify
 from app.orchestrator.models import AgentRunResult
 from app.orchestrator.profiles import AgentProfile
 from app.tools.gateway import ToolGateway
+from app.tools.context import current_tool_context
 from app.tools.registry import ToolRegistry
 from app.tracing.recorder import TraceRecorder
 from app.tracing.span import trace_span
@@ -80,11 +84,32 @@ class SubAgentExecutor:
         start = time.perf_counter()
         registry = self._filtered_registry(profile)
         gateway = ToolGateway(registry, settings=self.settings, recorder=self.recorder)
+        inherited = dict(current_tool_context.get() or {})
+        inherited.setdefault("session_id", current_session_id.get())
+        inherited.setdefault("turn_id", orchestration_run_id)
+        invocation_scope = agent_instance_id or f"agent_{uuid4().hex}"
+        current_call = {}
+        sequence = 0
 
         user_content = task if not context else f"{task}\n\n【依赖步骤结果（仅作参考）】\n{context}"
 
         async def _execute_tool(name: str, args: dict, on_retry=None):
-            return await gateway.execute(name, args, on_retry=on_retry)
+            identity = json.dumps([inherited.get("invocation_key"), invocation_scope,
+                                   sequence, current_call.get("id")])
+            invocation_key = "tool_" + hashlib.sha256(identity.encode()).hexdigest()
+            context = {key: inherited.get(key, "") for key in ("session_id", "turn_id")}
+            context.update(tool_call_id=current_call.get("id", ""),
+                           agent_instance_id=invocation_scope,
+                           orchestration_run_id=orchestration_run_id)
+            token = current_tool_context.set({**inherited, **context, "invocation_key": invocation_key})
+            try:
+                return await gateway.execute(
+                    name, args, user=inherited.get("user"), on_retry=on_retry,
+                    invocation_key=invocation_key, context=context,
+                    on_approval=inherited.get("on_approval"),
+                )
+            finally:
+                current_tool_context.reset(token)
 
         # 消息序列：system（人设）+ user（委派任务）
         messages = [
@@ -140,6 +165,9 @@ class SubAgentExecutor:
             )
 
         async def _before_tool(tool_call, step: int) -> None:
+            nonlocal sequence
+            sequence += 1
+            current_call["id"] = tool_call.id
             await notify(
                 hooks,
                 "agent_tool_started",
@@ -226,6 +254,7 @@ class SubAgentExecutor:
                     result.answer = f"（部分成果）{m['content'][:2000]}"
                     break
         finally:
+            gateway.close()
             result.duration_ms = round((time.perf_counter() - start) * 1000, 3)
         return result
 

@@ -9,7 +9,7 @@ SQLite Checkpoint 仓库。
 
 恢复语义（配合 AgentState.status）：
     - RUNNING       -> 直接从 messages 继续循环（LLM 将看到已有工具结果）
-    - PENDING_TOOL  -> 需要重新执行 pending_tool_calls（工具可能重复执行）
+    - PENDING_TOOL  -> 以保存的 invocation_key 恢复 pending_tool_calls
     - DONE          -> 已结束，无需继续
 """
 import json
@@ -118,6 +118,17 @@ class SQLiteCheckpointRepository:
             row = self._conn.execute(
                 "SELECT * FROM checkpoints WHERE session_id = ? AND version = ?",
                 (session_id, version),
+            ).fetchone()
+        return self._to_record(row)
+
+    def load_latest_for_turn(self, session_id: str, turn_id: str) -> CheckpointRecord | None:
+        """Find this job's checkpoint even after another job used the session."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM checkpoints WHERE session_id = ? "
+                "AND (turn_id = ? OR json_extract(state, '$.invocation_turn_id') = ?) "
+                "ORDER BY version DESC LIMIT 1",
+                (session_id, turn_id, turn_id),
             ).fetchone()
         return self._to_record(row)
 

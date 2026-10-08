@@ -79,6 +79,8 @@ class PlanExecutor:
         memory_context: list[str] | None = None,
         *,
         plan_version: int = 1,
+        existing_plan: list[PlanStep] | None = None,
+        resume_step_messages: list[dict] | None = None,
     ) -> tuple[list[PlanStep], str, list[ToolCallRequest]]:
         """
         执行计划。
@@ -89,7 +91,7 @@ class PlanExecutor:
         :return: (计划步骤(含结果), 最终回答, 全部工具调用)
         """
         # 1) 规划（传入记忆上下文）
-        plan = await self.planner.plan(task, memory_context)
+        plan = existing_plan if existing_plan is not None else await self.planner.plan(task, memory_context)
         if not plan:
             # 无计划（off 策略）：降级为直接 ReAct 完整执行
             await self._notify(
@@ -109,13 +111,18 @@ class PlanExecutor:
             )
             return [], answer, calls
 
-        await self._notify("plan_created", plan, plan_version, task)
+        if existing_plan is None:
+            await self._notify("plan_created", plan, plan_version, task)
         all_calls: list[ToolCallRequest] = []
         step_results: list[str] = []
 
         # 2) 逐步执行（每步独立 messages）
         total = len(plan)
         for step in plan:
+            if existing_plan is not None and step.status in {"SUCCEEDED", "FAILED", "SKIPPED"}:
+                step_results.append(step.result)
+                continue
+            continued_messages = resume_step_messages if step.status == "RUNNING" else None
             step.status = "RUNNING"
             await self._notify("plan_step_started", step, plan_version, total)
             # 每步构造【完全独立】的消息视图：
@@ -129,6 +136,9 @@ class PlanExecutor:
                 )
             step_messages.append({"role": "system", "content": _step_prompt(task, step, total)})
             step_messages.append({"role": "user", "content": step.description})
+            if continued_messages is not None:
+                step_messages = continued_messages
+                resume_step_messages = None
 
             try:
                 _, step_answer, _, step_calls = await run_react_loop(
@@ -142,7 +152,8 @@ class PlanExecutor:
                 )
                 all_calls.extend(step_calls)
                 # 步骤成功标准：有回答 且（无工具要求 或 至少调用了一次工具）
-                success = bool(step_answer) and (not step.tools_hint or bool(step_calls))
+                used_tools = bool(step_calls) or any(m["role"] == "tool" for m in step_messages)
+                success = bool(step_answer) and (not step.tools_hint or used_tools)
                 step.status = "SUCCEEDED" if success else "FAILED"
                 step.result = step_answer[:120] if step_answer else "无回答"
                 step_results.append(step.result)

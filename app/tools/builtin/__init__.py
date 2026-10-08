@@ -277,6 +277,8 @@ def build_default_registry() -> ToolRegistry:
             handler=file_write_handler,
             timeout_seconds=5.0,
             risk_level="low",
+            side_effects=True,
+            idempotent=False,
         )
     )
     registry.register(
@@ -287,6 +289,8 @@ def build_default_registry() -> ToolRegistry:
             handler=send_email_handler,
             timeout_seconds=20.0,
             risk_level="medium",
+            side_effects=True,
+            idempotent=False,
         )
     )
     registry.register(
@@ -307,6 +311,8 @@ def build_default_registry() -> ToolRegistry:
             handler=run_code_handler,
             timeout_seconds=30.0,
             risk_level="medium",
+            side_effects=True,
+            idempotent=False,
         )
     )
     registry.register(
@@ -387,6 +393,8 @@ def build_default_registry() -> ToolRegistry:
             handler=append_note_handler,
             timeout_seconds=5.0,
             risk_level="low",
+            side_effects=True,
+            idempotent=False,
         )
     )
     return registry

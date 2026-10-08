@@ -52,6 +52,8 @@ class LoopHooks:
     after_tool: Callable[[ToolCallRequest, ToolResult, int], Awaitable[None]] | None = None
     # Gateway 实际安排了一次瞬时故障重试（tool_call, step, attempt, max_retries, error）
     tool_retry_scheduled: Callable[[ToolCallRequest, int, int, int, Any], Awaitable[None]] | None = None
+    approval_requested: Callable[[dict], Awaitable[None]] | None = None
+    approval_resolved: Callable[[dict], Awaitable[None]] | None = None
     # 即将返回最终回答之前（保存"Final Answer 前"检查点）
     before_final: Callable[[LLMResponse, int], Awaitable[None]] | None = None
     # Context Builder 已生成真正送入模型的输入（ContextBuildResult, step）

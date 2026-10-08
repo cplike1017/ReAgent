@@ -17,9 +17,8 @@ PolicyDecision 是策略评估的结构化结果：
     4. 默认 ALLOW
 
 设计说明（用户决策）：
-    目前无人工确认通道，require_confirmation_risks 默认空（全部放行），
-    避免 MCP 外部工具被策略误伤；后续引入 LLM 危险度评估器（RiskEvaluator）
-    根据工具实际行为决定放行或转入人工确认。
+    require_confirmation_risks 保留空默认值（全部放行）；配置指定风险等级后，
+    Gateway 通过持久化 HITL 审批通道等待明确决策。RiskEvaluator 仍为预留接口。
 """
 from typing import Any, Callable
 
@@ -56,7 +55,7 @@ class PolicyEngine:
         # 工具黑名单：命中即拒绝
         self.denied_tools = denied_tools or []
         # 达到该风险等级的工具需要人工确认
-        # 优先级：显式参数 > Settings（默认空 = 全部放行，等待 HITL 通道）
+        # 优先级：显式参数 > Settings（默认空 = 全部放行）
         if require_confirmation_risks is not None:
             self.require_confirmation_risks = require_confirmation_risks
         else:

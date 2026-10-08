@@ -30,11 +30,14 @@ from app.config import Settings
 from app.errors import (
     ToolError,
     ToolExecutionError,
+    ToolIdempotencyError,
     ToolPermissionError,
     ToolPolicyError,
     ToolTimeoutError,
     ToolValidationError,
 )
+from app.tools.approvals import ToolApprovalService
+from app.tools.invocations import SQLiteToolInvocationRepository, invocation_fingerprint
 from app.tools.policy import PolicyEngine
 from app.tools.registry import ToolRegistry
 from app.tools.schemas import ToolResult, UserContext
@@ -44,6 +47,7 @@ from app.tracing.span import trace_span
 
 # 第一个参数是即将开始的重试次数（从 1 起），第二个是最多允许的重试数。
 ToolRetryHook = Callable[[int, int, Any], Awaitable[None]]
+ToolApprovalHook = Callable[[dict], Awaitable[None]]
 
 
 class PermissionChecker:
@@ -69,6 +73,8 @@ class ToolGateway:
         permission_checker: PermissionChecker | None = None,
         settings: Settings | None = None,
         recorder: TraceRecorder | None = None,
+        invocation_repo: SQLiteToolInvocationRepository | None = None,
+        approval_service: ToolApprovalService | None = None,
     ) -> None:
         self.registry = registry
         self.settings = settings or Settings()
@@ -77,6 +83,14 @@ class ToolGateway:
         self.permission_checker = permission_checker or PermissionChecker()
         self.max_retries = self.settings.max_tool_retries
         self.recorder = recorder  # None = 不追踪
+        self.invocation_repo = invocation_repo or SQLiteToolInvocationRepository(self.settings.database_url)
+        self._owns_invocation_repo = invocation_repo is None
+        self.approval_service = approval_service or ToolApprovalService(
+            self.settings.database_url,
+            timeout_seconds=self.settings.tool_approval_timeout_seconds,
+            poll_seconds=self.settings.tool_approval_poll_seconds,
+        )
+        self._owns_approval_service = approval_service is None
 
     # ------------------------------------------------------------------
     async def execute(
@@ -86,10 +100,16 @@ class ToolGateway:
         user: UserContext | None = None,
         *,
         on_retry: ToolRetryHook | None = None,
+        invocation_key: str | None = None,
+        context: dict | None = None,
+        on_approval: ToolApprovalHook | None = None,
     ) -> ToolResult:
         """执行一次工具调用，返回统一信封（永不抛异常，除非 Gateway 自身故障）。"""
         if self.recorder is None or not self.recorder.enabled:
-            return await self._execute_impl(name, args, user, on_retry=on_retry)
+            return await self._execute_impl(
+                name, args, user, on_retry=on_retry, invocation_key=invocation_key,
+                context=context, on_approval=on_approval,
+            )
 
         async with trace_span(
             "tool_gateway",
@@ -98,7 +118,10 @@ class ToolGateway:
             attributes={"tool_name": name},
             recorder=self.recorder,
         ) as span:
-            result = await self._execute_impl(name, args, user, on_retry=on_retry)
+            result = await self._execute_impl(
+                name, args, user, on_retry=on_retry, invocation_key=invocation_key,
+                context=context, on_approval=on_approval,
+            )
             span.output = {
                 "success": result.success,
                 "error_type": result.error.type if result.error else None,
@@ -112,6 +135,9 @@ class ToolGateway:
         user: UserContext | None,
         *,
         on_retry: ToolRetryHook | None = None,
+        invocation_key: str | None = None,
+        context: dict | None = None,
+        on_approval: ToolApprovalHook | None = None,
     ) -> ToolResult:
         start = time.perf_counter()
         metadata: dict = {
@@ -131,6 +157,8 @@ class ToolGateway:
         except ValidationError as exc:
             err = ToolValidationError(f"参数校验失败: {exc.errors()}")
             return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+        validated_args = validated.model_dump()
+        canonical_args = validated.model_dump(mode="json")
 
         # ---- 2) Permission：身份维度 ----
         try:
@@ -144,12 +172,81 @@ class ToolGateway:
             err = ToolPolicyError(f"{decision.reason}（policy={decision.policy_name}）")
             return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
         if decision.decision == "REQUIRE_CONFIRMATION":
-            # 教学简化：没有确认通道时按拒绝处理，并保留策略名供审计
-            err = ToolPolicyError(f"{decision.reason}（当前无确认通道，按拒绝处理）")
-            return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+            if not invocation_key:
+                err = ToolPolicyError(f"{decision.reason}（缺少可持久化的调用标识，无法确认）")
+                return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+            record = None
+            try:
+                record = self.approval_service.ensure_request(
+                    invocation_key, name, canonical_args,
+                    user_id=user.user_id if user else None, context=context,
+                    reason=decision.reason, policy_name=decision.policy_name,
+                )
+                if on_approval is not None:
+                    await on_approval(record.public_dict())
+                if record.status == "pending":
+                    record = await self.approval_service.wait_for_decision(record.id)
+                    if on_approval is not None:
+                        await on_approval(record.public_dict())
+                if record.status != "approved":
+                    err = ToolPolicyError(f"工具调用未获批准（status={record.status}）")
+                    return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+            except asyncio.CancelledError:
+                if record is not None:
+                    self.approval_service.cancel(record.id, reason="Waiting execution was cancelled")
+                raise
+            except Exception as exc:
+                err = ToolPolicyError(f"工具确认失败: {exc}", code=getattr(exc, "code", ""))
+                return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+
+        # Approval is persisted before claiming execution: restart can resume waiting.
+        if invocation_key:
+            metadata["invocation_key"] = invocation_key
+            try:
+                fingerprint = invocation_fingerprint(name, canonical_args, user.user_id if user else None)
+                claim = self.invocation_repo.claim(invocation_key, fingerprint)
+            except ToolIdempotencyError as exc:
+                return ToolResult.fail(name, exc, metadata=self._meta(start, metadata))
+            except Exception as exc:
+                err = ToolExecutionError(f"工具调用记录不可用: {exc}")
+                return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+            if not claim.claimed:
+                if claim.status == "COMPLETED" and claim.result is not None:
+                    replay = claim.result.model_copy(deep=True)
+                    replay.metadata["idempotency_replayed"] = True
+                    return replay
+                code = "INVOCATION_IN_PROGRESS" if claim.status == "RUNNING" else "INVOCATION_OUTCOME_UNKNOWN"
+                err = ToolIdempotencyError("此前调用仍在执行或结果不确定，禁止重复执行", code=code)
+                return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+
+        try:
+            result = await self._execute_tool(tool, validated_args, start, metadata, on_retry=on_retry)
+        except BaseException:
+            if invocation_key:
+                self.invocation_repo.mark_unknown(invocation_key)
+            raise
+        if invocation_key:
+            try:
+                uncertain = result.error is not None and (
+                    result.error.type == "ToolTimeoutError" or (tool.side_effects and not tool.idempotent)
+                )
+                if uncertain:
+                    self.invocation_repo.mark_unknown(invocation_key)
+                else:
+                    self.invocation_repo.complete(invocation_key, result)
+            except Exception as exc:
+                self.invocation_repo.mark_unknown(invocation_key)
+                err = ToolExecutionError(f"工具执行结果无法可靠记录: {exc}", code="INVOCATION_PERSISTENCE_FAILED")
+                return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
+        return result
+
+    async def _execute_tool(
+        self, tool, validated_args: dict, start: float, metadata: dict,
+        *, on_retry: ToolRetryHook | None = None,
+    ) -> ToolResult:
+        name = tool.name
 
         # ---- 4) Execute + Timeout + 瞬时错误重试 ----
-        validated_args = validated.model_dump()
         attempt = 0
         while True:
             span_kwargs = {
@@ -188,7 +285,7 @@ class ToolGateway:
                 err = ToolTimeoutError(f"工具 {name} 执行超过 {tool.timeout_seconds}s")
                 return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
             except ToolExecutionError as exc:
-                if exc.transient and attempt < self.max_retries:
+                if exc.transient and (not tool.side_effects or tool.idempotent) and attempt < self.max_retries:
                     attempt += 1
                     if on_retry is not None:
                         retry_error = ToolResult.fail(name, exc).error
@@ -209,6 +306,13 @@ class ToolGateway:
                 return ToolResult.fail(name, err, metadata=self._meta(start, metadata))
 
         return ToolResult.ok(name, data, metadata=self._meta(start, metadata, retries=attempt))
+
+    def close(self) -> None:
+        """Release persistence resources created by this gateway."""
+        if self._owns_invocation_repo:
+            self.invocation_repo.close()
+        if self._owns_approval_service and self.approval_service is not None:
+            self.approval_service.close()
 
     @staticmethod
     def _meta(start: float, base: dict, retries: int = 0) -> dict:

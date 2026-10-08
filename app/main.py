@@ -22,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from app.agent.runtime import AgentRuntime
 from app.api.routes import router
 from app.api.web import router as web_router
+from app.api.approvals import router as approvals_router
 from app.api.research import router as research_router, research_error_handler
 from app.checkpoint.repository import SQLiteCheckpointRepository
 from app.execution.repository import SQLiteExecutionRepository
@@ -195,6 +196,7 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
             await _quiet_mcp_close(app.state.runtime.mcp_client)
         if app.state.runtime.memory is not None:
             app.state.runtime.memory.close()
+        app.state.runtime.tool_gateway.close()
         execution_repository.close()
         if research_embedding is not None:
             close_embedding = getattr(research_embedding, "aclose", None)
@@ -207,6 +209,7 @@ def create_app(settings: Settings | None = None, redis=None) -> FastAPI:
     app = FastAPI(title=settings.app_name, version=settings.agent_version, lifespan=lifespan)
     app.include_router(router)
     app.include_router(web_router)
+    app.include_router(approvals_router)
     app.include_router(research_router)
     app.add_exception_handler(ResearchError, research_error_handler)
     # Web UI 静态资源

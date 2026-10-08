@@ -80,6 +80,7 @@ class ScriptedLLM(BaseLLMClient):
 @pytest.fixture
 def orch_settings(tmp_path) -> Settings:
     return Settings(
+        database_url=f"sqlite:///{tmp_path}/orchestration.db",
         environment="test",
         trace_enabled=False,
         agent_mode="react",

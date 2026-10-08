@@ -18,6 +18,7 @@ evals/runs/
 build/
 dist/
 .playwright-cli/
+.playwright-mcp/
 output/playwright/
 output/research-tools-*/
 .worktrees/

@@ -68,6 +68,10 @@ class ToolTimeoutError(ToolError):
     """工具执行超过 timeout_seconds（由 Tool Gateway 统一计时并中断）。"""
 
 
+class ToolIdempotencyError(ToolError):
+    """Invocation identity conflicts or the previous execution has an uncertain outcome."""
+
+
 class ToolExecutionError(ToolError):
     """工具内部抛出的业务异常（如计算器遇到除零、天气库查无此城市）。
 
